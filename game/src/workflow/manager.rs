@@ -425,6 +425,7 @@ impl WorkflowManager {
 
         Some(WorkflowResource {
             instance_id: state.instance_id.clone(),
+            current_node_id: state.current_node_id.clone(),
             workflow_id: state.workflow_id.clone(),
             name: current_node.title.clone(),
             description: current_node.description.clone(),

@@ -1,16 +1,23 @@
-use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::{collections::HashMap, future::Future};
 
-use serde_json::from_value;
+use futures::lock::Mutex;
+use serde_json::{Value, from_value, json};
 
+use crate::workflow::server_action::ServerActionResult;
 use crate::{
     gamestate::{ActionTarget, GameState, RoleContext},
     workflow::{CreateWorkflowDefinition, WorkflowDefinition},
 };
 
+pub struct WorkflowDefinitionWithInput {
+    pub definition: CreateWorkflowDefinition,
+    pub input: HashMap<String, serde_json::Value>,
+}
+
 pub type RoleAbility = Arc<
-    dyn Fn(RoleContext) -> Pin<Box<dyn Future<Output = Option<WorkflowDefinition>> + Send>>
+    dyn Fn(RoleContext) -> Pin<Box<dyn Future<Output = Option<WorkflowDefinitionWithInput>> + Send>>
         + Send
         + Sync,
 >;
@@ -58,10 +65,24 @@ impl std::fmt::Debug for RoleAbilitySpec {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct RoleCard {
     pub name: String,
     pub night_ability: Option<RoleAbilitySpec>,
+    pub register: Option<
+        Arc<
+            dyn Fn(Arc<Mutex<GameState>>) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync,
+        >,
+    >,
+}
+
+impl std::fmt::Debug for RoleCard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RoleCard")
+            .field("name", &self.name)
+            .field("night_ability", &self.night_ability)
+            .finish()
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -74,6 +95,30 @@ pub enum TargetSelector {
 pub fn seer_card() -> RoleCard {
     RoleCard {
         name: "Seer".to_string(),
+        register: Some(Arc::new(|game: Arc<Mutex<GameState>>| {
+            Box::pin(async move {
+                // SAFETY: we know the game reference is valid for the duration of this future,
+                // and we're not retaining it beyond this call
+                game.lock()
+                    .await
+                    .workflow
+                    .register_server_action(
+                        "reveal_player",
+                        Box::new(|_x| {
+                            let mut response = HashMap::new();
+                            response.insert(
+                                "reveal_player".to_string(),
+                                json!({"name": "test", "role": "test"}),
+                            );
+                            Box::pin(
+                                async move { Ok(ServerActionResult::UpdateResponses(response)) },
+                            )
+                        }),
+                    )
+                    .await
+                    .expect("unable to register reveal player workflow");
+            })
+        })),
         night_ability: Some(RoleAbilitySpec {
             ability: Arc::new(|ctx: RoleContext| {
                 Box::pin(async move {
@@ -86,10 +131,177 @@ pub fn seer_card() -> RoleCard {
                             player.name, player.role_card.name
                         );
 
-                        return Some(serde_json::from_str::<WorkflowDefinition>(
-                            r#"{"id":"recipes_workflow","name":"Recipe Finder","description":"Find recipes based on main ingredients","initial_node_id":"ingredient_selection_node","nodes":{"ingredient_selection_node":{"id":"ingredient_selection_node","title":"Choose Your Main Ingredient","description":"Select the main ingredient you want to cook with","displays":[{"id":"recipe_search_base_select","display_type":{"Carousel":{"items_key":"bases","as":"base","content":[{"Card":{"title_key":"base.label","content":[],"layout":{"ActionImage":{"update_responses_key":"base","from_input_key":"base.value","action":"get_recipes","image_key":"recipe_details.image"}}}}]}}}],"inputs":[],"actions":[{"id":"get_recipes","label":"Get recipes","action_type":"RunServerAction","target":"test","style":null}],"layout":null,"condition":"Always","parent_id":null},"recipe_list_node":{"id":"recipe_list_node","title":"Recipe Results","description":"Choose from the recipes we found","displays":[{"id":"receipe_results","display_type":{"Carousel":{"items_key":"recipes","as":"recipe","content":[{"Card":{"title_key":"recipe.title","content":[{"Text":{"text_key":"recipe.description"}}],"layout":{"ActionImage":{"update_responses_key":"selected_recipe_slug","from_input_key":"recipe.slug","action":"get_recipe_details","image_key":"recipe.image"}}}}]}}}],"inputs":[],"actions":[{"id":"get_recipe_details","label":"View Recipe","action_type":"RunServerAction","target":"get_recipe_details","style":"primary"},{"id":"back_to_search","label":"Back to Search","action_type":"PreviousNode","target":null,"style":"secondary"}],"layout":null,"condition":{"ResponseExists":"recipes"},"parent_id":"ingredient_selection_node"},"recipe_details_node":{"id":"recipe_details_node","title":"Recipe Details","description":"Complete recipe information","displays":[{"id":"recipe_card","display_type":{"Page":{"title_key":"recipe_details.title","content":[{"CoverImage":{"src_set":[],"src_key":"recipe_details.image","display_width":null,"display_height":"500","alt_key":"recipe_details.title"}},{"Text":{"text_key":"recipe_details.description"}},{"GridList":{"items_key":"recipe_details.items","as":"item","layout":{"Md":2,"Xl":3},"content":[{"Flex":{"direction":"Row","content":[{"Image":{"src_set":[],"src_key":"item.image","display_width":"70","display_height":"70","alt_key":"item.name"}},{"Flex":{"direction":"Col","content":[{"Text":{"text_key":"item.name"}},{"Text":{"text_key":"item.amount"}}]}}]}}]}}]}}}],"inputs":[{"id":"ingredients_list","label":"Ingredients","input_type":{"Display":{"content":"recipe_details.ingredients"}},"default_value":null,"required":false,"width":"full"},{"id":"instructions","label":"Instructions","input_type":{"Display":{"content":"recipe_details.instructions"}},"default_value":null,"required":false,"width":"full"}],"actions":[{"id":"back_to_recipes","label":"Back to Recipes","action_type":"PreviousNode","target":null,"style":"secondary"},{"id":"save_recipe","label":"Save Recipe","action_type":"NextNode","target":null,"style":"primary"}],"layout":null,"condition":{"ResponseExists":"recipe_details"},"parent_id":"recipe_list_node"},"no_recipes_node":{"id":"no_recipes_node","title":"No Recipes Found","description":"No recipes match your criteria","displays":[],"inputs":[{"id":"no_results_message","label":"Sorry!","input_type":{"Display":{"content":"No recipes found for your selected criteria. Try adjusting your filters."}},"default_value":null,"required":false,"width":"full"}],"actions":[{"id":"try_again","label":"Try Different Ingredients","action_type":"PreviousNode","target":null,"style":"primary"}],"layout":null,"condition":{"ResponseEquals":{"field":"recipes","value":null}},"parent_id":"ingredient_selection_node"},"recipe_saved_node":{"id":"recipe_saved_node","title":"Recipe Saved","description":"Recipe has been saved to your collection","displays":[],"inputs":[{"id":"saved_message","label":"Success!","input_type":{"Display":{"content":"Recipe has been saved to your recipe collection."}},"default_value":null,"required":false,"width":"full"}],"actions":[{"id":"finish","label":"Done","action_type":"Submit","target":null,"style":"primary"},{"id":"find_another","label":"Find Another Recipe","action_type":"NextNode","target":null,"style":"secondary"}],"layout":null,"condition":"Always","parent_id":"recipe_details_node"}},"responses":{"tile_node_id":"recipe_list_node","tile_workflow_id":"recipe-finder-workflow","bases":[{"label":"Chicken","value":"chicken","image":""},{"label":"Beef","value":"beef","image":""},{"label":"Fish","value":"fish","image":""},{"label":"Pork","value":"pork","image":""},{"label":"Lamb","value":"lamb","image":""},{"label":"Clams","value":"clams","image":""},{"label":"Shrimp","value":"shrimp","image":""},{"label":"Crab","value":"crab","image":""},{"label":"Vegetables","value":"vegetables","image":""},{"label":"Pasta","value":"pasta","image":""},{"label":"Rice","value":"rice","image":""},{"label":"Beans","value":"beans","image":""}]},"server_actions":{"get_recipes":{"id":"test","name":"Fetch recipes by ingredient","description":null},"get_recipe_details":{"id":"test","name":"Get detailed recipe information","description":null}}}
+                        let mut input = HashMap::new();
+                        input.insert(
+                            "card_seen".to_string(),
+                            Value::String(player.role_card.name.clone()),
+                        );
+                        input.insert(
+                            "player_seen".to_string(),
+                            Value::String(player.name.clone()),
+                        );
+
+                        return Some(WorkflowDefinitionWithInput {
+                            definition: serde_json::from_str::<CreateWorkflowDefinition>(
+                                r#"{
+                              "id": "seer_ability_workflow",
+                              "name": "Seer Ability",
+                              "description": "Workflow for Seer to inspect a card",
+                              "initial_node_id": "select_card_node",
+                              "nodes": {
+                                "select_card_node": {
+                                  "id": "select_card_node",
+                                  "title": "Select a Card",
+                                  "description": "Choose a player or middle card to inspect",
+                                  "displays": [],
+                                  "inputs": [
+                                    {
+                                      "id": "selected_card",
+                                      "label": "Which card do you want to inspect?",
+                                      "input_type": {
+                                        "SelectCard": {
+                                          "filter": {
+                                            "PlayerOrMiddle": {
+                                              "allow_self": false
+                                            }
+                                          }
+                                        }
+                                      },
+                                      "default_value": null,
+                                      "required": true,
+                                      "width": "full"
+                                    }
+                                  ],
+                                  "actions": [
+                                    {
+                                      "id": "next",
+                                      "label": "Continue",
+                                      "action_type": "NextNode",
+                                      "target": null,
+                                      "style": "primary"
+                                    }
+                                  ],
+                                  "layout": null,
+                                  "condition": "Always",
+                                  "parent_id": null
+                                },
+                                "reveal_player_node": {
+                                  "id": "reveal_player_node",
+                                  "title": "Inspect Player",
+                                  "description": "See this player's role",
+                                  "displays": [],
+                                  "inputs": [],
+                                  "actions": [],
+                                  "layout": null,
+                                  "condition": {
+                                    "ResponseEquals": {
+                                      "field": "selected_card.type",
+                                      "value": "Player"
+                                    }
+                                  },
+                                  "parent_id": "select_card_node"
+                                },
+                                "reveal_middle_prompt_node": {
+                                  "id": "reveal_middle_prompt_node",
+                                  "title": "Inspect Middle Cards",
+                                  "description": "Choose a second middle card to inspect",
+                                  "displays": [],
+                                  "inputs": [
+                                    {
+                                      "id": "selected_card_2",
+                                      "label": "Pick another middle card",
+                                      "input_type": {
+                                        "SelectCard": {
+                                          "filter": "MiddleOnly"
+                                        }
+                                      },
+                                      "default_value": null,
+                                      "required": true,
+                                      "width": "full"
+                                    }
+                                  ],
+                                  "actions": [
+                                    {
+                                      "id": "next",
+                                      "label": "Reveal Cards",
+                                      "action_type": "NextNode",
+                                      "target": null,
+                                      "style": "primary"
+                                    }
+                                  ],
+                                  "layout": null,
+                                  "condition": {
+                                    "ResponseEquals": {
+                                      "field": "selected_card.type",
+                                      "value": "Middle"
+                                    }
+                                  },
+                                  "parent_id": "select_card_node"
+                                },
+                                "reveal_middle_node": {
+                                  "id": "reveal_middle_node",
+                                  "title": "Middle Cards Revealed",
+                                  "description": null,
+                                  "displays": [
+                                    {
+                                      "id": "middle_result",
+                                      "display_type": {
+                                        "Text": {
+                                          "text_key": "reveal_cards"
+                                        }
+                                      }
+                                    }
+                                  ],
+                                  "inputs": [],
+                                  "actions": [],
+                                  "layout": null,
+                                  "condition": {
+                                    "ResponseExists": "reveal_cards"
+                                  },
+                                  "parent_id": "reveal_middle_prompt_node"
+                                },
+                                "player_result_node": {
+                                  "id": "player_result_node",
+                                  "title": "Player Card Seen",
+                                  "description": null,
+                                  "displays": [
+                                    {
+                                      "id": "player_result_text",
+                                      "display_type": {
+                                        "Text": {
+                                          "text_key": "reveal_player"
+                                        }
+                                      }
+                                    }
+                                  ],
+                                  "inputs": [],
+                                  "actions": [],
+                                  "layout": null,
+                                  "condition": {
+                                    "ResponseExists": "reveal_player"
+                                  },
+                                  "parent_id": "reveal_player_node"
+                                }
+                              },
+                              "responses": {},
+                              "server_actions": {
+                                "reveal_player": {
+                                  "id": "reveal_player",
+                                  "name": "Reveal Player Role",
+                                  "description": "Resolves the selected player's role"
+                                },
+                                "reveal_cards": {
+                                  "id": "reveal_cards",
+                                  "name": "Reveal Middle Cards",
+                                  "description": "Resolves two middle cards"
+                                }
+                              }
+                            }
                             "#,
-                        ).unwrap());
+                            )
+                            .unwrap(),
+                            input,
+                        });
                     }
                     None
                 })
@@ -108,6 +320,7 @@ pub fn seer_card() -> RoleCard {
 
 pub fn werewolf_card() -> RoleCard {
     RoleCard {
+        register: None,
         name: "Werewolf".to_string(),
         night_ability: Some(RoleAbilitySpec {
             duration_secs: 10,
@@ -148,6 +361,7 @@ pub fn werewolf_card() -> RoleCard {
 
 pub fn villager_card() -> RoleCard {
     RoleCard {
+        register: None,
         name: "Villager".to_string(),
         night_ability: None,
     }
@@ -155,6 +369,7 @@ pub fn villager_card() -> RoleCard {
 
 pub fn witch_card() -> RoleCard {
     RoleCard {
+        register: None,
         name: "Witch".to_string(),
         night_ability: Some(RoleAbilitySpec {
             duration_secs: 10,
@@ -181,6 +396,7 @@ pub fn witch_card() -> RoleCard {
 
 pub fn doppelganger_card() -> RoleCard {
     RoleCard {
+        register: None,
         name: "Doppelgänger".to_string(),
         night_ability: Some(RoleAbilitySpec {
             duration_secs: 15,

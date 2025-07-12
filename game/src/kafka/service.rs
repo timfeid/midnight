@@ -79,6 +79,14 @@ pub struct KafkaService {
     pub workflows: WorkflowsPublisher,
 }
 
+impl std::fmt::Debug for KafkaService {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("KafkaService")
+            .field("brokers", &self.brokers)
+            .finish()
+    }
+}
+
 impl KafkaService {
     pub fn new(brokers: &str) -> Self {
         let producer: FutureProducer = ClientConfig::new()

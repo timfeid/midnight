@@ -1,10 +1,16 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+
+use futures::lock::Mutex;
 
 use crate::{
-    roles::{RoleAbilitySpec, RoleCard},
-    workflow::manager::WorkflowManager,
+    error::AppResult,
+    kafka::service::KafkaService,
+    roles::{RoleAbilitySpec, RoleCard, WorkflowDefinitionWithInput},
+    workflow::{
+        manager::WorkflowManager,
+        service::{WorkflowResource, WorkflowService},
+    },
 };
 
 #[derive(Clone, Debug)]
@@ -91,18 +97,42 @@ impl RoleContext {
 #[derive(Debug, Clone)]
 pub struct GameState {
     pub players: HashMap<String, Player>,
-    pub workflow: WorkflowManager,
+    pub middles: HashMap<String, Player>,
+    pub workflow: Arc<WorkflowService>,
 }
 
 impl GameState {
-    pub fn new(players: Vec<Player>) -> Self {
+    pub async fn new(players: Vec<Player>, middles: Vec<Player>, kafka: Arc<KafkaService>) -> Self {
+        let mut middles_map = HashMap::new();
+        for player in middles {
+            middles_map.insert(player.id.clone(), player);
+        }
         let mut map = HashMap::new();
         for player in players {
             map.insert(player.id.clone(), player);
         }
         GameState {
             players: map,
-            workflow: WorkflowManager::new(),
+            middles: middles_map,
+            workflow: Arc::new(WorkflowService::new(kafka).await),
         }
+    }
+
+    pub async fn start_workflow(
+        &mut self,
+        player_id: &str,
+        config: WorkflowDefinitionWithInput,
+    ) -> AppResult<WorkflowResource> {
+        let workflow_definition_id = self
+            .workflow
+            .register_workflow_definition("bot", config.definition)
+            .await?;
+
+        let resource = self
+            .workflow
+            .start_workflow(&workflow_definition_id, player_id, config.input)
+            .await?;
+
+        Ok(resource)
     }
 }

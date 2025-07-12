@@ -8,6 +8,7 @@ use std::{collections::HashMap, path::PathBuf, sync::Arc};
 use crate::{
     error::{AppResult, ServicesError},
     kafka::service::KafkaService,
+    workflow::server_action::ServerActionHandler,
 };
 
 use super::{
@@ -30,6 +31,7 @@ pub struct WorkflowResource {
     pub displays: Vec<WorkflowDisplay>,
     pub layout: Option<String>,
     pub user_id: String,
+    pub current_node_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
@@ -37,14 +39,28 @@ pub struct WorkflowRespondServerActionArgs {
     token: String,
     result: ServerActionResult,
 }
-
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 pub struct ProcessWorkflowActionArgs {
-    instance_id: String,
-    action_id: String,
-    inputs: HashMap<String, serde_json::Value>,
+    pub instance_id: String,
+    pub action_id: String,
+    pub inputs: HashMap<String, serde_json::Value>,
 }
 
+impl ProcessWorkflowActionArgs {
+    pub fn new(
+        instance_id: String,
+        action_id: String,
+        inputs: HashMap<String, serde_json::Value>,
+    ) -> ProcessWorkflowActionArgs {
+        ProcessWorkflowActionArgs {
+            instance_id,
+            action_id,
+            inputs,
+        }
+    }
+}
+
+#[derive(Debug)]
 pub struct WorkflowService {
     pub(crate) manager: Arc<WorkflowManager>,
     pub(crate) kafka: Arc<KafkaService>,
@@ -71,6 +87,18 @@ impl WorkflowService {
     }
 
     pub async fn register_server_action(
+        &self,
+        action_id: &str,
+        action: ServerActionHandler,
+    ) -> AppResult<()> {
+        self.manager
+            .register_server_action(action_id, action)
+            .await?;
+
+        Ok(())
+    }
+
+    pub async fn register_external_server_action(
         &self,
         user_id: &str,
         action_id: &str,
@@ -122,19 +150,20 @@ impl WorkflowService {
         &self,
         workflow_id: &str,
         user_id: &str,
+        inputs: HashMap<String, Value>,
     ) -> AppResult<WorkflowResource> {
         let id = self
             .manager
-            .start_workflow(workflow_id, user_id, HashMap::new())
+            .start_workflow(workflow_id, user_id, inputs)
             .await
             .map_err(ServicesError::from)?;
 
         let workflow = self.get_workflow_resource(&id).await?;
-        // self.kafka
-        //     .workflows
-        //     .create_workflow(workflow.clone())
-        //     .await
-        //     .ok();
+        self.kafka
+            .workflows
+            .create_workflow(workflow.clone())
+            .await
+            .ok();
 
         Ok(workflow)
     }
@@ -195,7 +224,9 @@ impl WorkflowService {
                 workflow_id,
                 user_id,
             } => {
-                let workflow = self.start_workflow(&workflow_id, &user_id).await?;
+                let workflow = self
+                    .start_workflow(&workflow_id, &user_id, HashMap::new())
+                    .await?;
                 self.kafka.workflows.create_workflow(workflow).await.ok();
             }
             ActionProcessResult::ServerActionStarted {

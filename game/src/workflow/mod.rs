@@ -8,35 +8,15 @@ pub(crate) mod server_action;
 pub mod service;
 
 #[derive(Type, Debug, Clone, Serialize, Deserialize)]
+pub enum CardFilter {
+    PlayerOnly { allow_self: bool },
+    MiddleOnly,
+    PlayerOrMiddle { allow_self: bool },
+}
+
+#[derive(Type, Debug, Clone, Serialize, Deserialize)]
 pub enum InputType {
-    Text {
-        placeholder: Option<String>,
-    },
-    Select {
-        options: Vec<SelectOption>,
-    },
-    Checkbox {
-        label: String,
-    },
-    Number {
-        min: Option<u32>,
-        max: Option<u32>,
-    },
-    TextArea {
-        placeholder: Option<String>,
-        rows: Option<u32>,
-    },
-    List {
-        from_responses_id: String,
-        item_key: String,
-        display_field: String,
-    },
-    ServerActionLoader {
-        target: String,
-    },
-    Display {
-        content: String,
-    },
+    SelectCard { filter: CardFilter },
 }
 
 #[derive(Type, Debug, Clone, Serialize, Deserialize)]
