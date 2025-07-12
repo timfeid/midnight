@@ -157,6 +157,7 @@ impl WorkflowManager {
         } else {
             workflows.insert(final_id.clone(), definition);
         }
+        println!("Registered workflow definition with ID {}", final_id);
 
         Ok(final_id)
     }
@@ -276,6 +277,7 @@ impl WorkflowManager {
                             actions: target_node.actions.clone(),
                         })
                     } else {
+                        println!("lookn hre");
                         Err(WorkflowError::NodeNotFound)
                     }
                 } else {

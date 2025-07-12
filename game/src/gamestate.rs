@@ -1,14 +1,16 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use futures::lock::Mutex;
+use futures::{future::BoxFuture, lock::Mutex};
 
 use crate::{
     error::AppResult,
     kafka::service::KafkaService,
     roles::{RoleAbilitySpec, RoleCard, WorkflowDefinitionWithInput},
     workflow::{
+        CreateWorkflowDefinition,
         manager::WorkflowManager,
+        server_action::{ServerActionContext, ServerActionHandler, ServerActionResult},
         service::{WorkflowResource, WorkflowService},
     },
 };
@@ -99,6 +101,7 @@ pub struct GameState {
     pub players: HashMap<String, Player>,
     pub middles: HashMap<String, Player>,
     pub workflow: Arc<WorkflowService>,
+    pub role_contexts: Arc<Mutex<HashMap<String, RoleContext>>>,
 }
 
 impl GameState {
@@ -112,10 +115,27 @@ impl GameState {
             map.insert(player.id.clone(), player);
         }
         GameState {
+            role_contexts: Arc::new(Mutex::new(HashMap::new())),
             players: map,
             middles: middles_map,
             workflow: Arc::new(WorkflowService::new(kafka).await),
         }
+    }
+
+    pub async fn register_workflow_definition(
+        &self,
+        definition: CreateWorkflowDefinition,
+    ) -> AppResult<String> {
+        self.workflow
+            .register_workflow_definition("bot", definition)
+            .await
+    }
+    pub async fn set_context(&self, player_id: String, ctx: RoleContext) {
+        self.role_contexts.lock().await.insert(player_id, ctx);
+    }
+
+    pub async fn get_context(&self, player_id: &str) -> Option<RoleContext> {
+        self.role_contexts.lock().await.get(player_id).cloned()
     }
 
     pub async fn start_workflow(
@@ -123,16 +143,21 @@ impl GameState {
         player_id: &str,
         config: WorkflowDefinitionWithInput,
     ) -> AppResult<WorkflowResource> {
-        let workflow_definition_id = self
-            .workflow
-            .register_workflow_definition("bot", config.definition)
-            .await?;
-
         let resource = self
             .workflow
-            .start_workflow(&workflow_definition_id, player_id, config.input)
+            .start_workflow(&config.definition, player_id, config.input)
             .await?;
 
         Ok(resource)
+    }
+
+    pub async fn register_server_action(
+        &self,
+        action_id: &str,
+        handler: ServerActionHandler,
+    ) -> AppResult<()> {
+        self.workflow
+            .register_server_action(action_id, handler)
+            .await
     }
 }

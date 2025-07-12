@@ -26,10 +26,6 @@ pub enum GameEvent {
     TurnExpired {
         player_id: String,
     },
-    StartWorkflow {
-        player_id: String,
-        workflow: WorkflowResource,
-    },
     UpdateWorkflow {
         player_id: String,
         workflow: WorkflowResource,
@@ -78,23 +74,23 @@ impl GameRunner {
         }))
     }
 
-    pub async fn submit_action(
-        &self,
-        player_id: String,
-        ability: RoleAbilitySpec,
-        targets: Vec<ActionTarget>,
-    ) -> Result<(), String> {
-        let mut pending = self.pending_actions.lock().await;
-        if pending.contains_key(&player_id) {
-            return Err("Action already submitted".into());
-        }
-        pending.insert(player_id.clone(), (ability.clone(), targets));
-        drop(pending);
+    // pub async fn submit_action(
+    //     &self,
+    //     player_id: String,
+    //     ability: RoleAbilitySpec,
+    //     targets: Vec<ActionTarget>,
+    // ) -> Result<(), String> {
+    //     let mut pending = self.pending_actions.lock().await;
+    //     if pending.contains_key(&player_id) {
+    //         return Err("Action already submitted".into());
+    //     }
+    //     pending.insert(player_id.clone(), (ability.clone(), targets));
+    //     drop(pending);
 
-        self.play_ability(&player_id, PlayableAbility::NightAbility)
-            .await?;
-        Ok(())
-    }
+    //     self.play_ability(&player_id, PlayableAbility::NightAbility)
+    //         .await?;
+    //     Ok(())
+    // }
 
     pub async fn update_workflow(&self, player_id: &str, workflow: WorkflowResource) {
         self.event_sender
@@ -132,12 +128,19 @@ impl GameRunner {
         if let Some((ability, targets)) = action {
             let ctx = RoleContext::new(Arc::clone(&self.game), player_id.to_string(), targets);
             if let Some(workflow_definition_with_input) = (&ability.ability)(ctx).await {
-                self.game
+                let workflow = self
+                    .game
                     .lock()
                     .await
                     .start_workflow(player_id, workflow_definition_with_input)
                     .await
                     .expect("hmm workflow problems");
+                self.event_sender
+                    .send(GameEvent::UpdateWorkflow {
+                        player_id: player_id.to_string(),
+                        workflow,
+                    })
+                    .ok();
             }
 
             self.event_sender
@@ -152,14 +155,15 @@ impl GameRunner {
     }
 
     pub async fn register_cards(&self) {
-        let all_cards = {
+        let all_players = {
             let game = self.game.lock().await;
             let mut all_cards = game.players.clone();
             all_cards.extend(game.middles.clone());
             all_cards
         };
-        for card in all_cards.values() {
-            if let Some(register) = &card.role_card.register {
+        for player in all_players.values() {
+            if let Some(register) = &player.role_card.register {
+                println!("registering {}", player.role_card.name);
                 (register)(self.game.clone()).await;
             }
         }
@@ -197,7 +201,7 @@ impl GameRunner {
             }
 
             // STEP 3: Prepare RoleContext and check should_execute
-            let (should_execute, duration) = {
+            let (should_execute, duration, ctx) = {
                 let runner_guard = runner.lock().await;
                 let ctx =
                     RoleContext::new(Arc::clone(&runner_guard.game), player_id.clone(), vec![]);
@@ -205,12 +209,42 @@ impl GameRunner {
                 let should_execute = runner_guard.should_execute(&ctx, &ability).await;
                 let duration = Duration::from_secs(ability.duration_secs as u64);
 
-                (should_execute, duration)
+                (should_execute, duration, ctx)
             };
 
             if !should_execute {
                 println!("❌ Skipping {} (conditions not met)", player_id);
                 continue;
+            }
+
+            runner
+                .lock()
+                .await
+                .game
+                .lock()
+                .await
+                .set_context(player_id.clone(), ctx.clone())
+                .await;
+
+            if let Some(workflow_input) = (&ability.ability)(ctx.clone()).await {
+                let workflow = runner
+                    .lock()
+                    .await
+                    .game
+                    .lock()
+                    .await
+                    .start_workflow(&player_id, workflow_input)
+                    .await
+                    .expect("workflow start failed");
+                runner
+                    .lock()
+                    .await
+                    .event_sender
+                    .send(GameEvent::UpdateWorkflow {
+                        player_id: player_id.to_string(),
+                        workflow,
+                    })
+                    .ok();
             }
 
             // STEP 4: Wait for the turn duration without holding any lock
@@ -232,60 +266,6 @@ impl GameRunner {
             }
         }
     }
-
-    // pub async fn run(runner: Arc<Mutex<Self>>) {
-    //     {
-    //         runner.lock().await.register_cards().await;
-    //     }
-    //     loop {
-    //         let (player_id, ability) = {
-    //             let mut guard = runner.lock().await;
-    //             match guard.stages.pop_front() {
-    //                 Some(stage) => stage,
-    //                 None => return,
-    //             }
-    //         };
-
-    //         println!("⏳ It's {}'s turn: {}", player_id, ability.description);
-
-    //         runner
-    //             .lock()
-    //             .await
-    //             .event_sender
-    //             .send(GameEvent::TurnStarted {
-    //                 player_id: player_id.clone(),
-    //                 ability: ability.clone(),
-    //             })
-    //             .ok();
-
-    //         let ctx = RoleContext::new(
-    //             Arc::clone(&runner.lock().await.game),
-    //             player_id.clone(),
-    //             vec![],
-    //         );
-
-    //         if !runner.lock().await.should_execute(&ctx, &ability).await {
-    //             println!("❌ Skipping {} (conditions not met)", player_id);
-    //             continue;
-    //         }
-
-    //         let duration = Duration::from_secs(ability.duration_secs as u64);
-    //         println!(
-    //             "🔔 Waiting {}s for {} to act...",
-    //             ability.duration_secs, player_id
-    //         );
-    //         runner.lock().await.wait_for_turn(duration).await;
-
-    //         runner
-    //             .lock()
-    //             .await
-    //             .event_sender
-    //             .send(GameEvent::TurnExpired {
-    //                 player_id: player_id.clone(),
-    //             })
-    //             .ok();
-    //     }
-    // }
 
     async fn should_execute(&self, ctx: &RoleContext, ability: &RoleAbilitySpec) -> bool {
         if let Some(cond) = &ability.condition {
@@ -361,28 +341,6 @@ mod tests {
         tokio::spawn(async move {
             while let Ok(event) = rx.recv().await {
                 match event {
-                    GameEvent::TurnStarted { player_id, ability } => {
-                        let targets = match player_id.as_str() {
-                            "dopple" => vec![ActionTarget::Player("witch".into())],
-                            "witch" => vec![
-                                ActionTarget::Player("seer".into()),
-                                ActionTarget::Player("villager2".into()),
-                            ],
-                            "seer" => vec![ActionTarget::Player("dopple".into())],
-                            _ => vec![],
-                        };
-
-                        let runner_clone = Arc::clone(&runner_inner);
-                        tokio::spawn(async move {
-                            let _ = runner_clone
-                                .lock()
-                                .await
-                                .submit_action(player_id.clone(), ability.clone(), targets)
-                                .await;
-                            println!("submitted action");
-                        });
-                    }
-
                     GameEvent::UpdateWorkflow {
                         player_id,
                         workflow,
@@ -399,7 +357,7 @@ mod tests {
                                 );
                                 ProcessWorkflowActionArgs::new(
                                     workflow.instance_id,
-                                    "NextNode".into(),
+                                    "next".into(),
                                     input,
                                 )
                             }

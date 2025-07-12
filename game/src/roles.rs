@@ -12,7 +12,7 @@ use crate::{
 };
 
 pub struct WorkflowDefinitionWithInput {
-    pub definition: CreateWorkflowDefinition,
+    pub definition: String,
     pub input: HashMap<String, serde_json::Value>,
 }
 
@@ -97,215 +97,212 @@ pub fn seer_card() -> RoleCard {
         name: "Seer".to_string(),
         register: Some(Arc::new(|game: Arc<Mutex<GameState>>| {
             Box::pin(async move {
-                // SAFETY: we know the game reference is valid for the duration of this future,
-                // and we're not retaining it beyond this call
-                game.lock()
+                // Note: take new clones for each move into each closure
+                let game_for_reveal_cards = Arc::clone(&game);
+                game
+                    .lock()
                     .await
-                    .workflow
                     .register_server_action(
-                        "reveal_player",
-                        Box::new(|_x| {
-                            let mut response = HashMap::new();
-                            response.insert(
-                                "reveal_player".to_string(),
-                                json!({"name": "test", "role": "test"}),
-                            );
+                        "reveal_cards",
+                        Box::new(move |state| {
+                            let game_for_reveal_cards = Arc::clone(&game_for_reveal_cards);
                             Box::pin(
-                                async move { Ok(ServerActionResult::UpdateResponses(response)) },
+                                async move {
+                                    println!(
+                                        "context: {:?}",
+                                        game_for_reveal_cards.lock().await.get_context(&state.user_id).await
+                                    );
+                                    let mut response = HashMap::new();
+                                    response.insert(
+                                        "reveal_cards".to_string(),
+                                        json!([{"name": "test", "role": "test"},{"name": "test", "role": "test"}]),
+                                    );
+                                    Ok(ServerActionResult::UpdateResponses(response))
+                                }
                             )
                         }),
                     )
                     .await
+                    .expect("unable to register reveal cards workflow");
+                let game_for_reveal_player = Arc::clone(&game);
+                game.lock()
+                    .await
+                    .register_server_action(
+                        "reveal_player",
+                        Box::new(move |state| {
+                            let game_for_reveal_player = Arc::clone(&game_for_reveal_player);
+                            Box::pin(async move {
+                                println!(
+                                    "context: {:?}",
+                                    game_for_reveal_player
+                                        .lock()
+                                        .await
+                                        .get_context(&state.user_id)
+                                        .await
+                                );
+                                let mut response = HashMap::new();
+                                response.insert(
+                                    "reveal_player".to_string(),
+                                    json!({"name": "test", "role": "test"}),
+                                );
+                                Ok(ServerActionResult::UpdateResponses(response))
+                            })
+                        }),
+                    )
+                    .await
                     .expect("unable to register reveal player workflow");
-            })
-        })),
-        night_ability: Some(RoleAbilitySpec {
-            ability: Arc::new(|ctx: RoleContext| {
-                Box::pin(async move {
-                    if let Some(ActionTarget::Player(pid)) = ctx.targets.get(0) {
-                        let state = ctx.game.lock().await;
-                        let player = &state.players[pid];
 
-                        println!(
-                            "🔮 Seer inspects {}: {}",
-                            player.name, player.role_card.name
-                        );
-
-                        let mut input = HashMap::new();
-                        input.insert(
-                            "card_seen".to_string(),
-                            Value::String(player.role_card.name.clone()),
-                        );
-                        input.insert(
-                            "player_seen".to_string(),
-                            Value::String(player.name.clone()),
-                        );
-
-                        return Some(WorkflowDefinitionWithInput {
-                            definition: serde_json::from_str::<CreateWorkflowDefinition>(
-                                r#"{
-                              "id": "seer_ability_workflow",
-                              "name": "Seer Ability",
-                              "description": "Workflow for Seer to inspect a card",
-                              "initial_node_id": "select_card_node",
-                              "nodes": {
-                                "select_card_node": {
-                                  "id": "select_card_node",
-                                  "title": "Select a Card",
-                                  "description": "Choose a player or middle card to inspect",
-                                  "displays": [],
-                                  "inputs": [
-                                    {
-                                      "id": "selected_card",
-                                      "label": "Which card do you want to inspect?",
-                                      "input_type": {
-                                        "SelectCard": {
-                                          "filter": {
-                                            "PlayerOrMiddle": {
-                                              "allow_self": false
-                                            }
-                                          }
-                                        }
-                                      },
-                                      "default_value": null,
-                                      "required": true,
-                                      "width": "full"
+                game.lock()
+                    .await
+                    .register_workflow_definition(
+                        serde_json::from_str::<CreateWorkflowDefinition>(
+                            r#"{
+                      "id": "seer_ability_workflow",
+                      "name": "Seer Ability",
+                      "description": "Workflow for Seer to inspect a card",
+                      "initial_node_id": "select_card_node",
+                      "nodes": {
+                        "select_card_node": {
+                          "id": "select_card_node",
+                          "title": "Select a Card",
+                          "description": "Choose a player or middle card to inspect",
+                          "displays": [],
+                          "inputs": [
+                            {
+                              "id": "selected_card",
+                              "label": "Which card do you want to inspect?",
+                              "input_type": {
+                                "SelectCard": {
+                                  "filter": {
+                                    "PlayerOrMiddle": {
+                                      "allow_self": false
                                     }
-                                  ],
-                                  "actions": [
-                                    {
-                                      "id": "next",
-                                      "label": "Continue",
-                                      "action_type": "NextNode",
-                                      "target": null,
-                                      "style": "primary"
-                                    }
-                                  ],
-                                  "layout": null,
-                                  "condition": "Always",
-                                  "parent_id": null
-                                },
-                                "reveal_player_node": {
-                                  "id": "reveal_player_node",
-                                  "title": "Inspect Player",
-                                  "description": "See this player's role",
-                                  "displays": [],
-                                  "inputs": [],
-                                  "actions": [],
-                                  "layout": null,
-                                  "condition": {
-                                    "ResponseEquals": {
-                                      "field": "selected_card.type",
-                                      "value": "Player"
-                                    }
-                                  },
-                                  "parent_id": "select_card_node"
-                                },
-                                "reveal_middle_prompt_node": {
-                                  "id": "reveal_middle_prompt_node",
-                                  "title": "Inspect Middle Cards",
-                                  "description": "Choose a second middle card to inspect",
-                                  "displays": [],
-                                  "inputs": [
-                                    {
-                                      "id": "selected_card_2",
-                                      "label": "Pick another middle card",
-                                      "input_type": {
-                                        "SelectCard": {
-                                          "filter": "MiddleOnly"
-                                        }
-                                      },
-                                      "default_value": null,
-                                      "required": true,
-                                      "width": "full"
-                                    }
-                                  ],
-                                  "actions": [
-                                    {
-                                      "id": "next",
-                                      "label": "Reveal Cards",
-                                      "action_type": "NextNode",
-                                      "target": null,
-                                      "style": "primary"
-                                    }
-                                  ],
-                                  "layout": null,
-                                  "condition": {
-                                    "ResponseEquals": {
-                                      "field": "selected_card.type",
-                                      "value": "Middle"
-                                    }
-                                  },
-                                  "parent_id": "select_card_node"
-                                },
-                                "reveal_middle_node": {
-                                  "id": "reveal_middle_node",
-                                  "title": "Middle Cards Revealed",
-                                  "description": null,
-                                  "displays": [
-                                    {
-                                      "id": "middle_result",
-                                      "display_type": {
-                                        "Text": {
-                                          "text_key": "reveal_cards"
-                                        }
-                                      }
-                                    }
-                                  ],
-                                  "inputs": [],
-                                  "actions": [],
-                                  "layout": null,
-                                  "condition": {
-                                    "ResponseExists": "reveal_cards"
-                                  },
-                                  "parent_id": "reveal_middle_prompt_node"
-                                },
-                                "player_result_node": {
-                                  "id": "player_result_node",
-                                  "title": "Player Card Seen",
-                                  "description": null,
-                                  "displays": [
-                                    {
-                                      "id": "player_result_text",
-                                      "display_type": {
-                                        "Text": {
-                                          "text_key": "reveal_player"
-                                        }
-                                      }
-                                    }
-                                  ],
-                                  "inputs": [],
-                                  "actions": [],
-                                  "layout": null,
-                                  "condition": {
-                                    "ResponseExists": "reveal_player"
-                                  },
-                                  "parent_id": "reveal_player_node"
+                                  }
                                 }
                               },
-                              "responses": {},
-                              "server_actions": {
-                                "reveal_player": {
-                                  "id": "reveal_player",
-                                  "name": "Reveal Player Role",
-                                  "description": "Resolves the selected player's role"
-                                },
-                                "reveal_cards": {
-                                  "id": "reveal_cards",
-                                  "name": "Reveal Middle Cards",
-                                  "description": "Resolves two middle cards"
+                              "default_value": null,
+                              "required": true,
+                              "width": "full"
+                            }
+                          ],
+                          "actions": [
+                            {
+                              "id": "next",
+                              "label": "Continue",
+                              "action_type": "NextNode",
+                              "target": null,
+                              "style": "primary"
+                            }
+                          ],
+                          "layout": null,
+                          "condition": "Always",
+                          "parent_id": null
+                        },
+                        "reveal_middle_prompt_node": {
+                          "id": "reveal_middle_prompt_node",
+                          "title": "Inspect Middle Cards",
+                          "description": "Choose a second middle card to inspect",
+                          "displays": [],
+                          "inputs": [
+                            {
+                              "id": "selected_card_2",
+                              "label": "Pick another middle card",
+                              "input_type": {
+                                "SelectCard": {
+                                  "filter": "MiddleOnly"
+                                }
+                              },
+                              "default_value": null,
+                              "required": true,
+                              "width": "full"
+                            }
+                          ],
+                          "actions": [
+                            {
+                              "id": "next",
+                              "label": "Reveal Cards",
+                              "action_type": "NextNode",
+                              "target": null,
+                              "style": "primary"
+                            }
+                          ],
+                          "layout": null,
+                          "condition": {
+                            "ResponseEquals": {
+                              "field": "selected_card.type",
+                              "value": "Middle"
+                            }
+                          },
+                          "parent_id": "select_card_node"
+                        },
+                        "reveal_middle_node": {
+                          "id": "reveal_middle_node",
+                          "title": "Middle Cards Revealed",
+                          "description": null,
+                          "displays": [
+                            {
+                              "id": "middle_result",
+                              "display_type": {
+                                "Text": {
+                                  "text_key": "reveal_cards"
                                 }
                               }
                             }
-                            "#,
-                            )
-                            .unwrap(),
-                            input,
-                        });
+                          ],
+                          "inputs": [],
+                          "actions": [],
+                          "layout": null,
+                          "condition": {
+                            "ResponseExists": "reveal_cards"
+                          },
+                          "parent_id": "reveal_middle_prompt_node"
+                        },
+                        "player_result_node": {
+                          "id": "player_result_node",
+                          "title": "Player Card Seen",
+                          "description": null,
+                          "displays": [
+                            {
+                              "id": "player_result_text",
+                              "display_type": {
+                                "Text": {
+                                  "text_key": "reveal_player"
+                                }
+                              }
+                            }
+                          ],
+                          "inputs": [],
+                          "actions": [],
+                          "layout": null,
+                          "condition": {
+                            "ResponseExists": "player_seen"
+                          },
+                          "parent_id": "select_card_node"
+                        }
+                      },
+                      "responses": {},
+                      "server_actions": {
+                        "reveal_player": {
+                          "id": "reveal_player",
+                          "name": "Reveal Player Role",
+                          "description": "Resolves the selected player's role"
+                        },
+                        "reveal_cards": {
+                          "id": "reveal_cards",
+                          "name": "Reveal Middle Cards",
+                          "description": "Resolves two middle cards"
+                        }
+                      }
                     }
-                    None
-                })
-            }),
+                    "#,
+                        )
+                        .unwrap(),
+                    )
+                    .await
+                    .expect("unable to register wf");
+            })
+        })),
+        night_ability: Some(RoleAbilitySpec {
             target_selector: TargetSelector::SinglePlayer,
             validator: None,
             description: "Inspect a player's role.".to_string(),
@@ -314,6 +311,15 @@ pub fn seer_card() -> RoleCard {
             allowed_phases: AbilityPhaseScope::Night,
             allowed_turns: AbilityTurnScope::YourTurn,
             condition: None,
+            ability: Arc::new(|_ctx: RoleContext| {
+                Box::pin(async move {
+                    // The Seer opens a workflow - there is no normal input map here
+                    Some(WorkflowDefinitionWithInput {
+                        definition: "user-bot-wf-seer_ability_workflow".to_string(),
+                        input: HashMap::new(),
+                    })
+                })
+            }),
         }),
     }
 }
