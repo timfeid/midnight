@@ -14,6 +14,29 @@ pub struct ServerActionContext {
     pub inputs: HashMap<String, Value>,
 }
 
+impl ServerActionContext {
+    fn get_nested_value<'a>(
+        map: &'a HashMap<String, serde_json::Value>,
+        dotted_path: &str,
+    ) -> Option<&'a serde_json::Value> {
+        let mut current = map.get(dotted_path.split('.').next()?)?;
+
+        for key in dotted_path.split('.').skip(1) {
+            match current {
+                serde_json::Value::Object(obj) => {
+                    current = obj.get(key)?;
+                }
+                _ => return None,
+            }
+        }
+
+        Some(current)
+    }
+    pub fn get_input(&self, path: &str) -> Option<&Value> {
+        Self::get_nested_value(&self.inputs, path)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 pub enum ServerActionResult {
     NextPage {
@@ -21,6 +44,7 @@ pub enum ServerActionResult {
     },
     UpdateResponses(HashMap<String, Value>),
     CompleteWorkflow {
+        responses: HashMap<String, Value>,
         message: String,
     },
     StartNewWorkflow {

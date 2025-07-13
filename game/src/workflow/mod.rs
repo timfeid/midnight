@@ -78,6 +78,12 @@ pub enum DisplayType {
         variant: String,
         text_key: String,
     },
+    RevealCards {
+        reveal_card_keys: Vec<String>,
+    },
+    SelectCards {
+        card_id_keys: Vec<String>,
+    },
     Text {
         text_key: String,
     },

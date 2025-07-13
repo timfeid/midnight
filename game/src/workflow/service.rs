@@ -159,6 +159,7 @@ impl WorkflowService {
             .map_err(ServicesError::from)?;
 
         let workflow = self.get_workflow_resource(&id).await?;
+        println!("hello");
         self.kafka
             .workflows
             .create_workflow(workflow.clone())

@@ -1,0 +1,180 @@
+{
+  "id": "seer_ability_workflow",
+  "name": "Seer Ability",
+  "description": "Workflow for Seer to inspect a card",
+  "initial_node_id": "select_card_node",
+  "nodes": {
+    "select_card_node": {
+      "id": "select_card_node",
+      "title": "Select a Card",
+      "description": "Choose a player or middle card to inspect",
+      "displays": [],
+      "inputs": [
+        {
+          "id": "selected_card",
+          "label": "Which card do you want to inspect?",
+          "input_type": {
+            "SelectCard": {
+              "filter": {
+                "PlayerOrMiddle": {
+                  "allow_self": false
+                }
+              }
+            }
+          },
+          "default_value": null,
+          "required": true,
+          "width": "full"
+        }
+      ],
+      "actions": [
+        {
+          "id": "next",
+          "label": "Continue",
+          "action_type": "NextNode",
+          "target": null,
+          "style": "primary"
+        }
+      ],
+      "layout": null,
+      "condition": "Always",
+      "parent_id": null
+    },
+    "prompt_player_reveal": {
+      "id": "prompt_player_reveal",
+      "title": "Do you want to reveal this player's role?",
+      "description": "",
+      "displays": [
+        {
+          "id": "selected_card",
+          "display_type": {
+            "SelectCards": {
+              "card_id_keys": ["selected_card"]
+            }
+          }
+        }
+      ],
+      "inputs": [],
+      "actions": [
+        {
+          "id": "next",
+          "label": "Reveal Cards",
+          "action_type": "RunServerAction",
+          "target": "reveal_player",
+          "style": "primary"
+        }
+      ],
+      "layout": null,
+      "condition": {
+        "ResponseEquals": {
+          "field": "selected_card.type",
+          "value": "Player"
+        }
+      },
+      "parent_id": "select_card_node"
+    },
+    "prompt_another_middle_node": {
+      "id": "prompt_another_middle_node",
+      "title": "Please chose another middle card.",
+      "description": "",
+      "displays": [
+        {
+          "id": "selected_card",
+          "display_type": {
+            "SelectCards": {
+              "card_id_keys": ["selected_card"]
+            }
+          }
+        }
+      ],
+      "inputs": [
+        {
+          "id": "selected_card_2",
+          "label": "Pick another middle card",
+          "input_type": {
+            "SelectCard": {
+              "filter": "MiddleOnly"
+            }
+          },
+          "default_value": null,
+          "required": true,
+          "width": "full"
+        }
+      ],
+      "actions": [
+        {
+          "id": "next",
+          "label": "Reveal Cards",
+          "action_type": "RunServerAction",
+          "target": "reveal_cards",
+          "style": "primary"
+        }
+      ],
+      "layout": null,
+      "condition": {
+        "ResponseEquals": {
+          "field": "selected_card.type",
+          "value": "Middle"
+        }
+      },
+      "parent_id": "select_card_node"
+    },
+    "reveal_player_cards": {
+      "id": "reveal_player_cards",
+      "title": "Player revealed",
+      "description": null,
+      "displays": [
+        {
+          "id": "reveal_cards",
+          "display_type": {
+            "RevealCards": {
+              "reveal_card_keys": ["reveal_player"]
+            }
+          }
+        }
+      ],
+      "inputs": [],
+      "actions": [],
+      "layout": null,
+      "condition": {
+        "ResponseExists": "reveal_player"
+      },
+      "parent_id": "prompt_player_reveal"
+    },
+    "reveal_middle_cards": {
+      "id": "reveal_middle_cards",
+      "title": "Middle Cards Revealed",
+      "description": null,
+      "displays": [
+        {
+          "id": "reveal_cards",
+          "display_type": {
+            "RevealCards": {
+              "reveal_card_keys": ["reveal_middle_one", "reveal_middle_two"]
+            }
+          }
+        }
+      ],
+      "inputs": [],
+      "actions": [],
+      "layout": null,
+      "condition": {
+        "ResponseExists": "reveal_middle_one"
+      },
+      "parent_id": "prompt_another_middle_node"
+    }
+  },
+  "responses": {},
+  "server_actions": {
+    "reveal_player": {
+      "id": "reveal_player",
+      "name": "Reveal Player Role",
+      "description": "Resolves the selected player's role"
+    },
+    "reveal_cards": {
+      "id": "reveal_cards",
+      "name": "Reveal Middle Cards",
+      "description": "Resolves two middle cards"
+    }
+  }
+}

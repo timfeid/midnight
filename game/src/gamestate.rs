@@ -6,7 +6,7 @@ use futures::{future::BoxFuture, lock::Mutex};
 use crate::{
     error::AppResult,
     kafka::service::KafkaService,
-    roles::{RoleAbilitySpec, RoleCard, WorkflowDefinitionWithInput},
+    roles::{RoleAbility, RoleAbilitySpec, RoleCard, WorkflowDefinitionWithInput},
     workflow::{
         CreateWorkflowDefinition,
         manager::WorkflowManager,
@@ -39,12 +39,8 @@ impl Player {
             .unwrap_or_else(|| self.role_card.clone())
     }
 
-    pub fn get_night_ability(&self) -> Option<RoleAbilitySpec> {
-        if let Some(copied) = &self.copied_role_card {
-            copied.night_ability.clone()
-        } else {
-            self.role_card.night_ability.clone()
-        }
+    pub fn get_original_role_card(&self) -> Arc<RoleCard> {
+        self.role_card.clone()
     }
 }
 
@@ -57,37 +53,22 @@ pub enum ActionTarget {
 #[derive(Clone, Debug)]
 pub struct RoleContext {
     pub game: Arc<Mutex<GameState>>,
-    pub actor: String,
-    pub targets: Vec<ActionTarget>,
+    pub user_id: String,
 }
 
 impl RoleContext {
     /// Create a new RoleContext
-    pub fn new(
-        game: Arc<Mutex<GameState>>,
-        actor: impl Into<String>,
-        targets: Vec<ActionTarget>,
-    ) -> Self {
+    pub fn new(game: Arc<Mutex<GameState>>, actor: impl Into<String>) -> Self {
         Self {
             game,
-            actor: actor.into(),
-            targets,
+            user_id: actor.into(),
         }
     }
 
     /// Get a reference to the actor player from the game
     pub async fn get_player(&self) -> Option<Player> {
         let game = self.game.lock().await;
-        game.players.get(&self.actor).cloned()
-    }
-
-    /// Return a new RoleContext with updated targets
-    pub fn with_targets(&self, new_targets: Vec<ActionTarget>) -> Self {
-        Self {
-            game: Arc::clone(&self.game),
-            actor: self.actor.clone(),
-            targets: new_targets,
-        }
+        game.players.get(&self.user_id).cloned()
     }
 
     /// Return a clone of the shared game Arc

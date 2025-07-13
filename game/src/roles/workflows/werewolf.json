@@ -1,0 +1,70 @@
+{
+  "id": "werewolf_ability_workflow",
+  "name": "Werewolf Ability",
+  "description": "If a Werewolf wakes up and they see no other Werewolves, they are allowed to look at one card in the center",
+  "initial_node_id": "select_card_node",
+  "nodes": {
+    "select_card_node": {
+      "id": "select_card_node",
+      "title": "Select a Card",
+      "description": "Choose a card from a the middle",
+      "displays": [],
+      "inputs": [
+        {
+          "id": "selected_card",
+          "label": "Which card do you want to inspect?",
+          "input_type": {
+            "SelectCard": {
+              "filter": "MiddleOnly"
+            }
+          },
+          "default_value": null,
+          "required": true,
+          "width": "full"
+        }
+      ],
+      "actions": [
+        {
+          "id": "next",
+          "label": "Reveal Cards",
+          "action_type": "RunServerAction",
+          "target": "reveal_cards",
+          "style": "primary"
+        }
+      ],
+      "layout": null,
+      "condition": "Always",
+      "parent_id": null
+    },
+    "reveal_middle_cards": {
+      "id": "reveal_middle_cards",
+      "title": "Middle Cards Revealed",
+      "description": null,
+      "displays": [
+        {
+          "id": "reveal_cards",
+          "display_type": {
+            "RevealCards": {
+              "reveal_card_keys": ["reveal_middle_one"]
+            }
+          }
+        }
+      ],
+      "inputs": [],
+      "actions": [],
+      "layout": null,
+      "condition": {
+        "ResponseExists": "reveal_middle_one"
+      },
+      "parent_id": "select_card_node"
+    }
+  },
+  "responses": {},
+  "server_actions": {
+    "reveal_cards": {
+      "id": "reveal_cards",
+      "name": "Reveal Middle Cards",
+      "description": "Resolves two middle cards"
+    }
+  }
+}

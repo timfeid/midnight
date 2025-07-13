@@ -46,14 +46,50 @@ impl WorkflowsPublisher {
         let message = WorkflowTopicMessage::Created { workflow };
         // println!("Published message: {:?}", message);
 
-        self.publish(&message).await
+        let producer = self.producer.clone();
+        let payload =
+            serde_json::to_string(&message).map_err(|e| format!("Serialization error: {}", e))?;
+
+        let record = FutureRecord::to(KafkaTopic::Workflows.topic_name())
+            .payload(Box::leak(payload.into_boxed_str()))
+            .key("");
+
+        tokio::spawn(async move {
+            if let Err(e) = producer
+                .send(record, Duration::from_secs(5))
+                .await
+                .map_err(|(e, _)| format!("Failed to send message: {}", e))
+            {
+                eprintln!("Failed to publish workflow creation: {}", e);
+            }
+        });
+
+        Ok(())
     }
 
     pub async fn update_workflow(&self, workflow: WorkflowResource) -> Result<(), String> {
         let message = WorkflowTopicMessage::Updated { workflow };
         // println!("Published message: {:?}", message);
 
-        self.publish(&message).await
+        let producer = self.producer.clone();
+        let payload =
+            serde_json::to_string(&message).map_err(|e| format!("Serialization error: {}", e))?;
+
+        let record = FutureRecord::to(KafkaTopic::Workflows.topic_name())
+            .payload(Box::leak(payload.into_boxed_str()))
+            .key("");
+
+        tokio::spawn(async move {
+            if let Err(e) = producer
+                .send(record, Duration::from_secs(5))
+                .await
+                .map_err(|(e, _)| format!("Failed to send message: {}", e))
+            {
+                eprintln!("Failed to publish workflow creation: {}", e);
+            }
+        });
+
+        Ok(())
     }
 
     pub async fn request_server_action_request(

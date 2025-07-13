@@ -86,6 +86,24 @@ impl std::fmt::Debug for WorkflowManager {
 }
 
 impl WorkflowManager {
+    fn get_nested_value<'a>(
+        map: &'a HashMap<String, serde_json::Value>,
+        dotted_path: &str,
+    ) -> Option<&'a serde_json::Value> {
+        let mut current = map.get(dotted_path.split('.').next()?)?;
+
+        for key in dotted_path.split('.').skip(1) {
+            match current {
+                serde_json::Value::Object(obj) => {
+                    current = obj.get(key)?;
+                }
+                _ => return None,
+            }
+        }
+
+        Some(current)
+    }
+
     pub fn new() -> Self {
         WorkflowManager {
             workflows: Arc::new(Mutex::new(HashMap::new())),
@@ -396,27 +414,28 @@ impl WorkflowManager {
 
     fn evaluate_node_condition(&self, node: &WorkflowNode, state: &WorkflowState) -> bool {
         match &node.condition {
-            Some(NodeCondition::ResponseExists(field)) => state.responses.contains_key(field),
-            Some(NodeCondition::ResponseEquals { field, value }) => {
-                if let Some(response_value) = state.responses.get(field) {
-                    response_value == value
-                } else {
-                    false
-                }
+            Some(NodeCondition::ResponseExists(field)) => {
+                Self::get_nested_value(&state.responses, field).is_some()
             }
-            Some(NodeCondition::ResponseListNotEmpty(field)) => {
-                if let Some(response_value) = state.responses.get(field) {
-                    if let Some(array) = response_value.as_array() {
-                        !array.is_empty()
-                    } else {
+
+            Some(NodeCondition::ResponseEquals { field, value }) => {
+                match Self::get_nested_value(&state.responses, field) {
+                    Some(response_value) => response_value == value,
+                    None => {
+                        println!("{field} not found within");
                         false
                     }
-                } else {
-                    false
                 }
             }
-            Some(NodeCondition::Always) => true,
-            None => true,
+
+            Some(NodeCondition::ResponseListNotEmpty(field)) => {
+                match Self::get_nested_value(&state.responses, field) {
+                    Some(serde_json::Value::Array(arr)) => !arr.is_empty(),
+                    _ => false,
+                }
+            }
+
+            Some(NodeCondition::Always) | None => true,
         }
     }
 
@@ -478,6 +497,7 @@ impl WorkflowManager {
                     state.node_history.push(state.current_node_id.clone());
                     state.current_node_id = page_id.clone();
                 } else {
+                    println!("ooo");
                     return Err(WorkflowError::NodeNotFound);
                 }
             }
@@ -486,6 +506,7 @@ impl WorkflowManager {
                     state.responses.insert(key.clone(), value.clone());
                 }
 
+                println!("prob herezc$");
                 let current_node = workflow_definition
                     .nodes
                     .get(&state.current_node_id)
@@ -497,7 +518,10 @@ impl WorkflowManager {
                 state.current_node_id = valid_child.id.clone();
                 println!("updated valid child {:?}", valid_child);
             }
-            ServerActionResult::CompleteWorkflow { message } => {
+            ServerActionResult::CompleteWorkflow { message, responses } => {
+                for (key, value) in responses {
+                    state.responses.insert(key.clone(), value.clone());
+                }
                 state.complete_message = Some(message.clone());
                 state.completed = true;
             }
@@ -538,9 +562,11 @@ impl WorkflowManager {
             instance_id,
         };
 
+        println!("hellooo");
         let result = handler(context)
             .await
             .map_err(|e| WorkflowError::ServerActionFailed(e.to_string()))?;
+        println!("world");
 
         // Process server action result
         self.process_server_action_results(&result, &workflow_definition, workflow_id, state)
@@ -612,6 +638,7 @@ impl WorkflowManager {
                 }
             }
         }
+        println!("oh yeah we are here");
 
         // If no valid child found, return error
         Err(WorkflowError::NodeNotFound)

@@ -9,7 +9,7 @@ use tokio::time::sleep;
 use tokio::sync::broadcast;
 
 use crate::gamestate::{ActionTarget, GameState, RoleContext};
-use crate::roles::RoleAbilitySpec;
+use crate::roles::{RoleAbility, RoleAbilitySpec, RoleCard};
 use crate::workflow::service::{ProcessWorkflowActionArgs, WorkflowResource};
 use crate::workflow::{DisplayType, WorkflowState};
 
@@ -17,11 +17,10 @@ use crate::workflow::{DisplayType, WorkflowState};
 pub enum GameEvent {
     TurnStarted {
         player_id: String,
-        ability: RoleAbilitySpec,
+        role: RoleCard,
     },
     AbilityExecuted {
         player_id: String,
-        description: String,
     },
     TurnExpired {
         player_id: String,
@@ -42,23 +41,28 @@ pub type GameEventReceiver = broadcast::Receiver<GameEvent>;
 
 pub struct GameRunner {
     pub game: Arc<Mutex<GameState>>,
-    pub stages: VecDeque<(String, RoleAbilitySpec)>,
+    pub stages: VecDeque<(String, RoleCard)>,
     pub event_sender: GameEventSender,
-    pub pending_actions: Arc<Mutex<HashMap<String, (RoleAbilitySpec, Vec<ActionTarget>)>>>,
+    pub pending_actions: Arc<Mutex<HashMap<String, RoleAbility>>>,
 }
 
 impl GameRunner {
     pub async fn new(game: GameState, event_sender: GameEventSender) -> Arc<Mutex<Self>> {
         let game = Arc::new(Mutex::new(game));
 
-        let mut all_abilities: Vec<(String, RoleAbilitySpec)> = {
+        // Collect all (player_id, night ability role card) pairs into Vec<(String, RoleCard)>
+        let mut all_abilities: Vec<(String, RoleCard)> = {
             let g = game.lock().await;
             g.players
                 .iter()
                 .filter_map(|(id, player)| {
-                    player
-                        .get_night_ability()
-                        .map(|ability| (id.clone(), ability))
+                    if let Some(_night_ability) =
+                        player.get_original_role_card().night_ability.as_ref()
+                    {
+                        Some((id.clone(), (*player.get_original_role_card()).clone()))
+                    } else {
+                        None
+                    }
                 })
                 .collect()
         };
@@ -106,14 +110,11 @@ impl GameRunner {
         player_id: &str,
         args: ProcessWorkflowActionArgs,
     ) -> Result<(), String> {
-        let mut game = self.game.lock().await;
-        let instance = game
-            .workflow
+        let workflow = { self.game.lock().await.workflow.clone() };
+        let instance = workflow
             .process_action(player_id, args)
             .await
             .map_err(|e| format!("Workflow processing error: {}", e))?;
-
-        drop(game);
 
         self.update_workflow(player_id, instance).await;
         Ok(())
@@ -125,9 +126,9 @@ impl GameRunner {
             pending.remove(player_id)
         };
 
-        if let Some((ability, targets)) = action {
-            let ctx = RoleContext::new(Arc::clone(&self.game), player_id.to_string(), targets);
-            if let Some(workflow_definition_with_input) = (&ability.ability)(ctx).await {
+        if let Some(ability) = action {
+            let ctx = RoleContext::new(Arc::clone(&self.game), player_id.to_string());
+            if let Some(workflow_definition_with_input) = (&ability)(ctx).await {
                 let workflow = self
                     .game
                     .lock()
@@ -146,7 +147,6 @@ impl GameRunner {
             self.event_sender
                 .send(GameEvent::AbilityExecuted {
                     player_id: player_id.to_string(),
-                    description: ability.description.clone(),
                 })
                 .ok();
         }
@@ -155,15 +155,19 @@ impl GameRunner {
     }
 
     pub async fn register_cards(&self) {
-        let all_players = {
+        let all_cards = {
             let game = self.game.lock().await;
-            let mut all_cards = game.players.clone();
-            all_cards.extend(game.middles.clone());
+            let mut all_cards: Vec<_> = game
+                .players
+                .iter()
+                .map(|p| p.1.get_original_role_card())
+                .collect();
+            all_cards.extend(game.middles.iter().map(|p| p.1.get_original_role_card()));
             all_cards
         };
-        for player in all_players.values() {
-            if let Some(register) = &player.role_card.register {
-                println!("registering {}", player.role_card.name);
+        for player in all_cards.iter() {
+            if let Some(register) = &player.register {
+                println!("registering {}", player.name);
                 (register)(self.game.clone()).await;
             }
         }
@@ -171,45 +175,38 @@ impl GameRunner {
 
     pub async fn run(runner: Arc<Mutex<Self>>) {
         {
-            // Only hold the lock while registering cards
+            // Register cards up front — safe
             let runner_guard = runner.lock().await;
             runner_guard.register_cards().await;
         }
 
         loop {
-            // STEP 1: Pop the next stage
-            let (player_id, ability) = {
-                let mut runner_guard = runner.lock().await;
-                match runner_guard.stages.pop_front() {
-                    Some(stage) => stage,
+            // STEP 1: Pop stage
+            let (player_id, ability, game_arc) = {
+                let mut guard = runner.lock().await;
+                match guard.stages.pop_front() {
+                    Some((pid, ab)) => (pid.clone(), ab.clone(), Arc::clone(&guard.game)),
                     None => return,
                 }
             };
 
-            println!("⏳ It's {}'s turn: {}", player_id, ability.description);
+            println!("⏳ It's {}'s turn: {}", player_id, ability.name);
 
-            // STEP 2: Emit TurnStarted event
-            {
-                let runner_guard = runner.lock().await;
-                runner_guard
-                    .event_sender
-                    .send(GameEvent::TurnStarted {
-                        player_id: player_id.clone(),
-                        ability: ability.clone(),
-                    })
-                    .ok();
-            }
-
-            // STEP 3: Prepare RoleContext and check should_execute
+            // STEP 2: Check condition and set context — minimal lock time
             let (should_execute, duration, ctx) = {
-                let runner_guard = runner.lock().await;
-                let ctx =
-                    RoleContext::new(Arc::clone(&runner_guard.game), player_id.clone(), vec![]);
+                let mut game = game_arc.lock().await;
+                let ctx = RoleContext::new(Arc::clone(&game_arc), player_id.clone());
+                // let should = match &ability.condition {
+                //     Some(cond) => cond(&*game),
+                //     None => true,
+                // };
+                let duration = Duration::from_secs(1 as u64);
 
-                let should_execute = runner_guard.should_execute(&ctx, &ability).await;
-                let duration = Duration::from_secs(ability.duration_secs as u64);
+                // if should {
+                game.set_context(player_id.clone(), ctx.clone()).await;
+                // }
 
-                (should_execute, duration, ctx)
+                (true, duration, ctx)
             };
 
             if !should_execute {
@@ -217,47 +214,58 @@ impl GameRunner {
                 continue;
             }
 
-            runner
-                .lock()
-                .await
-                .game
-                .lock()
-                .await
-                .set_context(player_id.clone(), ctx.clone())
-                .await;
+            // STEP 3: Emit TurnStarted
+            {
+                runner
+                    .lock()
+                    .await
+                    .event_sender
+                    .send(GameEvent::TurnStarted {
+                        player_id: player_id.clone(),
+                        role: ability.clone(),
+                    })
+                    .ok();
+            }
 
-            if let Some(workflow_input) = (&ability.ability)(ctx.clone()).await {
-                let workflow = runner
-                    .lock()
-                    .await
-                    .game
-                    .lock()
-                    .await
-                    .start_workflow(&player_id, workflow_input)
+            // STEP 4: Generate workflow input (no locks held)
+
+            let mut workflow_input = None;
+            if let Some(ability) = &ability.night_ability {
+                workflow_input = (ability)(ctx.clone()).await;
+            }
+
+            // STEP 5: Start workflow if needed
+            if let Some(input) = workflow_input {
+                let mut game = game_arc.lock().await;
+                let wf = game
+                    .start_workflow(&player_id, input)
                     .await
                     .expect("workflow start failed");
+
                 runner
                     .lock()
                     .await
                     .event_sender
                     .send(GameEvent::UpdateWorkflow {
-                        player_id: player_id.to_string(),
-                        workflow,
+                        player_id: player_id.clone(),
+                        workflow: wf,
                     })
                     .ok();
             }
 
-            // STEP 4: Wait for the turn duration without holding any lock
+            // STEP 6: Sleep with no locks
             println!(
                 "🔔 Waiting {}s for {} to act...",
-                ability.duration_secs, player_id
+                duration.as_secs(),
+                player_id
             );
             sleep(duration).await;
 
-            // STEP 5: Emit TurnExpired event
+            // STEP 7: Emit TurnExpired
             {
-                let runner_guard = runner.lock().await;
-                runner_guard
+                runner
+                    .lock()
+                    .await
                     .event_sender
                     .send(GameEvent::TurnExpired {
                         player_id: player_id.clone(),
@@ -307,17 +315,6 @@ mod tests {
         let villager2 = villager_card();
         let mut seer = seer_card();
 
-        if let Some(ability) = dopple.night_ability.as_mut() {
-            ability.duration_secs = 1;
-        }
-        if let Some(ability) = seer.night_ability.as_mut() {
-            ability.duration_secs = 1;
-        }
-
-        if let Some(ability) = witch.night_ability.as_mut() {
-            ability.duration_secs = 1;
-        }
-
         let players = vec![
             Player::new("dopple", "Dopple Dan", Arc::new(dopple)),
             Player::new("witch", "Witch Wanda", Arc::new(witch)),
@@ -353,8 +350,19 @@ mod tests {
                                 let mut input = HashMap::new();
                                 input.insert(
                                     "selected_card".to_string(),
-                                    json!({"Player": {"id": "seer"}}),
+                                    json!({"type": "Player", "Player": {"id": "seer"}}),
                                 );
+                                println!("sending input back");
+                                ProcessWorkflowActionArgs::new(
+                                    workflow.instance_id,
+                                    "next".into(),
+                                    input,
+                                )
+                            }
+                            "prompt_player_reveal" => {
+                                // Simulate selecting a card to view
+                                let input = HashMap::new();
+                                println!("want to send next again");
                                 ProcessWorkflowActionArgs::new(
                                     workflow.instance_id,
                                     "next".into(),
@@ -366,6 +374,7 @@ mod tests {
 
                         let runner_clone = Arc::clone(&runner_inner);
                         tokio::spawn(async move {
+                            println!("runner {:?}", runner_clone);
                             runner_clone
                                 .lock()
                                 .await
