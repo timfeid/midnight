@@ -195,19 +195,56 @@ pub fn werewolf_card() -> RoleCard {
                         Box::new(move |state| {
                             let game_for_reveal_cards = Arc::clone(&game_for_reveal_cards);
                             Box::pin(async move {
-                                println!(
-                                    "context: {:?}",
+                                let context = {
                                     game_for_reveal_cards
                                         .lock()
                                         .await
                                         .get_context(&state.user_id)
                                         .await
-                                );
+                                        .ok_or(ServicesError::InternalError(
+                                            "something".to_string(),
+                                        ))?
+                                };
+                                let user_id = state
+                                    .get_input("selected_card.Middle.id")
+                                    .and_then(|x| x.as_str())
+                                    .ok_or(ServicesError::InternalError(
+                                        "No player id supplied".to_string(),
+                                    ))?;
+                                println!("user_id: {user_id}",);
+                                let user = {
+                                    let game = context.game.lock().await;
+                                    game.middles
+                                        .get(user_id)
+                                        .ok_or(ServicesError::InternalError(format!(
+                                            "Unable to find player with id {user_id}"
+                                        )))?
+                                        .clone()
+                                };
+                                let user_id2 = state
+                                    .get_input("selected_card_2.Middle.id")
+                                    .and_then(|x| x.as_str());
+                                println!("user_id2: {:?}", user_id2);
                                 let mut response = HashMap::new();
                                 response.insert(
                                     "reveal_middle_one".to_string(),
-                                    json!({"name": "test", "role": "test"}),
+                                    json!({"name": user.name, "card": &*user.role_card}),
                                 );
+                                if let Some(user_id2) = user_id2 {
+                                    let user = {
+                                        let game = context.game.lock().await;
+                                        game.middles
+                                            .get(user_id2)
+                                            .ok_or(ServicesError::InternalError(format!(
+                                                "Unable to find player with id {user_id2}"
+                                            )))?
+                                            .clone()
+                                    };
+                                    response.insert(
+                                        "reveal_middle_two".to_string(),
+                                        json!({"name": user.name, "card": &*user.role_card}),
+                                    );
+                                }
                                 Ok(ServerActionResult::UpdateResponses(response))
                             })
                         }),

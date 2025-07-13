@@ -45,7 +45,9 @@
           "id": "reveal_cards",
           "display_type": {
             "RevealCards": {
-              "reveal_card_keys": ["reveal_middle_one"]
+              "reveal_card_keys": [
+                "reveal_middle_one"
+              ]
             }
           }
         }

@@ -71,17 +71,6 @@ async fn main() {
                                     "selected_card".to_string(),
                                     json!({"type": "Middle", "Middle": {"id": "middle1"}}),
                                 );
-                                println!("sending input back");
-                                ProcessWorkflowActionArgs::new(
-                                    workflow.instance_id.clone(),
-                                    "next".into(),
-                                    input,
-                                )
-                            }
-                            "prompt_player_reveal" => {
-                                // Simulate selecting a card to view
-                                let input = HashMap::new();
-                                println!("want to send next again");
                                 ProcessWorkflowActionArgs::new(
                                     workflow.instance_id.clone(),
                                     "next".into(),
