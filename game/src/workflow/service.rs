@@ -1,3 +1,4 @@
+use super::manager::WorkflowEvent;
 use async_trait::async_trait;
 use futures::lock::Mutex;
 use serde::{Deserialize, Serialize};
@@ -7,7 +8,6 @@ use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use crate::{
     error::{AppResult, ServicesError},
-    kafka::service::KafkaService,
     workflow::server_action::ServerActionHandler,
 };
 
@@ -32,6 +32,7 @@ pub struct WorkflowResource {
     pub layout: Option<String>,
     pub user_id: String,
     pub current_node_id: String,
+    pub waiting: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
@@ -63,7 +64,8 @@ impl ProcessWorkflowActionArgs {
 #[derive(Debug)]
 pub struct WorkflowService {
     pub(crate) manager: Arc<WorkflowManager>,
-    pub(crate) kafka: Arc<KafkaService>,
+
+    waiting_for_response: Arc<Mutex<HashMap<String, (String, Option<String>)>>>,
     external_action_responses:
         Arc<tokio::sync::Mutex<HashMap<String, tokio::sync::oneshot::Sender<serde_json::Value>>>>,
 }
@@ -76,13 +78,14 @@ pub trait WorkflowPlugin: Send + Sync {
 }
 
 impl WorkflowService {
-    pub async fn new(kafka: Arc<KafkaService>) -> Self {
+    pub async fn new() -> Self {
         let manager = WorkflowManager::new();
 
         Self {
             manager: Arc::new(manager),
-            kafka,
+
             external_action_responses: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            waiting_for_response: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -137,45 +140,18 @@ impl WorkflowService {
             .map_err(ServicesError::from)?;
 
         let workflow = self.get_workflow_resource(&id).await?;
-        self.kafka
-            .workflows
-            .create_workflow(workflow.clone())
+        self.manager
+            .event_manager
+            .lock()
             .await
-            .ok();
-
-        Ok(workflow)
-    }
-
-    pub async fn start_workflow(
-        &self,
-        workflow_id: &str,
-        user_id: &str,
-        inputs: HashMap<String, Value>,
-    ) -> AppResult<WorkflowResource> {
-        let id = self
-            .manager
-            .start_workflow(workflow_id, user_id, inputs)
-            .await
-            .map_err(ServicesError::from)?;
-
-        let workflow = self.get_workflow_resource(&id).await?;
-        self.kafka
-            .workflows
-            .create_workflow(workflow.clone())
-            .await
-            .ok();
+            .workflow_started(workflow.clone());
 
         Ok(workflow)
     }
 
     pub async fn get_workflow_resource(&self, instance_id: &str) -> AppResult<WorkflowResource> {
-        let workflows = self.manager.active_workflows.lock().await;
-        let state = workflows.get(instance_id).ok_or(ServicesError::NotFound(
-            "Workflow instance not found".into(),
-        ))?;
-
         self.manager
-            .state_to_resource(state)
+            .get_workflow_resource(instance_id)
             .await
             .ok_or(ServicesError::InternalError("Failed to create workflow resource".into()).into())
     }
@@ -199,9 +175,9 @@ impl WorkflowService {
 
     pub async fn process_action(
         &self,
-        _user_id: &str,
+        user_id: &str,
         args: ProcessWorkflowActionArgs,
-    ) -> AppResult<WorkflowResource> {
+    ) -> AppResult<()> {
         // Check if this is an external server action
 
         let action = self
@@ -209,7 +185,9 @@ impl WorkflowService {
             .process_action(args.instance_id.clone(), &args.action_id, args.inputs)
             .await
             .map_err(ServicesError::from)?;
+        println!("hi2");
 
+        println!("should refresh .. ? {:?}", action);
         match action {
             ActionProcessResult::ExternalServerActionStarted { action_id, id, .. } => {
                 let resource = self.get_workflow_resource(&args.instance_id).await?;
@@ -225,30 +203,25 @@ impl WorkflowService {
                 user_id,
             } => {
                 let workflow = self
+                    .manager
                     .start_workflow(&workflow_id, &user_id, HashMap::new())
                     .await?;
-                self.kafka.workflows.create_workflow(workflow).await.ok();
             }
             ActionProcessResult::ServerActionStarted {
                 workflow_id,
                 action_id,
             } => {
-                self.manager
+                let result = self
+                    .manager
                     .execute_server_action(args.instance_id.clone(), &workflow_id, &action_id)
                     .await?;
             }
             // Handle other action types as needed
             _ => {}
-        }
+        };
+        println!("hi3");
 
-        let resource = self.get_workflow_resource(&args.instance_id).await?;
-        self.kafka
-            .workflows
-            .update_workflow(resource.clone())
-            .await
-            .ok();
-
-        Ok(resource)
+        Ok(())
     }
 
     pub async fn respond_server_action(
@@ -291,7 +264,7 @@ impl WorkflowService {
         // Clone what we need from self
         let external_action_responses = self.external_action_responses.clone();
         let manager = self.manager.clone();
-        let kafka = self.kafka.clone();
+
         println!("Looking for action id {action_id}");
 
         tokio::spawn(async move {
@@ -306,11 +279,6 @@ impl WorkflowService {
 
             // Set up the timeout
             let timeout_future = tokio::time::timeout(std::time::Duration::from_secs(10), rx);
-            kafka
-                .workflows
-                .request_server_action_request(token.clone(), workflow.clone(), action_id)
-                .await
-                .ok();
 
             match timeout_future.await {
                 Ok(Ok(result)) => {
@@ -370,7 +338,7 @@ impl WorkflowService {
                     wf.and_then(|w| Some(w.current_node_id.clone()))
                 );
             };
-            kafka.workflows.update_workflow(updated).await.ok();
+            manager.event_manager.lock().await.workflow_updated(updated);
         });
     }
 }

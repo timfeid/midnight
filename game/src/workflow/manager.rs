@@ -5,6 +5,8 @@ use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::Mutex;
 
+use crate::gamerunner::GameEvent;
+
 use super::server_action::{ServerActionContext, ServerActionHandler, ServerActionResult};
 use super::service::{WorkflowPlugin, WorkflowResource};
 use super::{
@@ -39,6 +41,12 @@ pub enum WorkflowError {
     InvalidState,
 }
 
+#[derive(Debug, Clone)]
+pub enum WorkflowEvent {
+    WorkflowStarted { resource: WorkflowResource },
+    WorkflowUpdated { resource: WorkflowResource },
+}
+
 #[derive(Debug)]
 pub enum ActionProcessResult {
     ShowNode {
@@ -65,13 +73,55 @@ pub enum ActionProcessResult {
     },
 }
 
-#[derive(Clone)]
+pub struct EventManager {
+    // Add new fields for managing events as needed
+    callbacks:
+        HashMap<String, Vec<Box<dyn Fn(WorkflowEvent) -> BoxFuture<'static, ()> + Send + Sync>>>,
+}
+
+impl EventManager {
+    pub fn new() -> Self {
+        EventManager {
+            callbacks: HashMap::new(), // Initialize fields
+        }
+    }
+
+    pub fn on_event(
+        &mut self,
+        callback: Box<dyn Fn(WorkflowEvent) -> BoxFuture<'static, ()> + Send + Sync>,
+    ) -> String {
+        let id = ulid::Ulid::new().to_string();
+        self.callbacks.entry(id.clone()).or_default().push(callback);
+        id
+    }
+
+    fn emit_event(&self, workflow_event: WorkflowEvent) {
+        for callbacks in self.callbacks.values() {
+            for cb in callbacks {
+                tokio::spawn(cb(workflow_event.clone()));
+            }
+        }
+    }
+
+    pub fn workflow_started(&self, resource: WorkflowResource) {
+        let event = WorkflowEvent::WorkflowStarted { resource };
+        self.emit_event(event);
+    }
+
+    pub fn workflow_updated(&self, resource: WorkflowResource) {
+        let event = WorkflowEvent::WorkflowUpdated { resource };
+        self.emit_event(event);
+    }
+}
+
 pub struct WorkflowManager {
     pub(crate) workflows: Arc<Mutex<HashMap<String, WorkflowDefinition>>>,
     pub(crate) active_workflows: Arc<Mutex<HashMap<String, WorkflowState>>>,
     user_preferences: Arc<Mutex<HashMap<(String, String), UserWorkflowPreferences>>>,
     server_action_handlers: Arc<Mutex<HashMap<String, ServerActionHandler>>>,
+    waiting_for_response: Arc<Mutex<HashMap<String, (String, Option<String>)>>>,
     pub(crate) external_server_actions: Arc<Mutex<HashSet<(String, String)>>>,
+    pub event_manager: Arc<Mutex<EventManager>>, // Add event manager to WorkflowManager
 }
 
 impl std::fmt::Debug for WorkflowManager {
@@ -111,6 +161,8 @@ impl WorkflowManager {
             user_preferences: Arc::new(Mutex::new(HashMap::new())),
             server_action_handlers: Arc::new(Mutex::new(HashMap::new())),
             external_server_actions: Arc::new(Mutex::new(HashSet::new())),
+            waiting_for_response: Arc::new(Mutex::new(HashMap::new())),
+            event_manager: Arc::new(Mutex::new(EventManager::new())),
         }
     }
 
@@ -211,31 +263,45 @@ impl WorkflowManager {
         user_id: &str,
         inputs: HashMap<String, serde_json::Value>,
     ) -> Result<String, WorkflowError> {
-        let hash_map = self.workflows.lock().await;
-        let workflow = hash_map
-            .get(workflow_id)
-            .ok_or(WorkflowError::WorkflowNotFound)?;
+        let state = {
+            let hash_map = self.workflows.lock().await;
+            let workflow = hash_map
+                .get(workflow_id)
+                .ok_or(WorkflowError::WorkflowNotFound)?;
 
-        let mut responses = workflow.responses.clone();
-        responses.extend(inputs);
+            let mut responses = workflow.responses.clone();
+            responses.extend(inputs);
 
-        let instance_id = ulid::Ulid::new().to_string();
-        let state = WorkflowState {
-            workflow_id: workflow_id.to_string(),
-            instance_id: instance_id.clone(),
-            user_id: user_id.to_string(),
-            current_node_id: workflow.initial_node_id.clone(),
-            node_history: Vec::new(),
-            responses,
-            message_id: None,
-            complete_message: None,
-            completed: false,
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
+            let instance_id = ulid::Ulid::new().to_string();
+            let state = WorkflowState {
+                workflow_id: workflow_id.to_string(),
+                instance_id: instance_id.clone(),
+                user_id: user_id.to_string(),
+                current_node_id: workflow.initial_node_id.clone(),
+                node_history: Vec::new(),
+                responses,
+                message_id: None,
+                complete_message: None,
+                completed: false,
+                waiting: false,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            };
+
+            state
         };
 
-        let mut active_workflows = self.active_workflows.lock().await;
-        active_workflows.insert(instance_id.clone(), state);
+        let instance_id = state.instance_id.clone();
+        {
+            let mut active_workflows = self.active_workflows.lock().await;
+            active_workflows.insert(instance_id.clone(), state);
+        }
+
+        self.event_manager.lock().await.workflow_started(
+            self.get_workflow_resource(&instance_id)
+                .await
+                .ok_or(WorkflowError::WorkflowNotFound)?,
+        );
 
         Ok(instance_id)
     }
@@ -246,10 +312,13 @@ impl WorkflowManager {
         action_id: &str,
         inputs: HashMap<String, serde_json::Value>,
     ) -> Result<ActionProcessResult, WorkflowError> {
-        let mut active_workflows = self.active_workflows.lock().await;
-        let state = active_workflows
-            .get_mut(&instance_id)
-            .ok_or(WorkflowError::WorkflowInstanceNotFound)?;
+        let state = &mut {
+            let mut active_workflows = self.active_workflows.lock().await;
+            active_workflows
+                .get_mut(&instance_id)
+                .ok_or(WorkflowError::WorkflowInstanceNotFound)?
+                .clone()
+        };
 
         if state.completed {
             return Err(WorkflowError::WorkflowAlreadyCompleted);
@@ -279,7 +348,7 @@ impl WorkflowManager {
             state.responses.insert(key, value);
         }
 
-        match action.action_type {
+        let response = match action.action_type {
             ActionType::NextNode => {
                 if let Some(target_node_id) = &action.target {
                     if let Some(target_node) = workflow.nodes.get(target_node_id) {
@@ -300,7 +369,8 @@ impl WorkflowManager {
                     }
                 } else {
                     // Find first valid child node
-                    let valid_child = self.find_valid_child_node(&workflow, current_node, state)?;
+                    let valid_child =
+                        self.find_valid_child_node(&workflow, current_node, &state)?;
                     state.node_history.push(state.current_node_id.clone());
                     state.current_node_id = valid_child.id.clone();
                     state.updated_at = chrono::Utc::now();
@@ -409,7 +479,17 @@ impl WorkflowManager {
                     Err(WorkflowError::WorkflowNotFound)
                 }
             }
-        }
+        }?;
+        let resource = self
+            .get_workflow_resource(&instance_id)
+            .await
+            .ok_or(WorkflowError::NodeNotFound)?;
+        self.event_manager
+            .lock()
+            .await
+            .workflow_updated(resource.clone());
+
+        Ok(response)
     }
 
     fn evaluate_node_condition(&self, node: &WorkflowNode, state: &WorkflowState) -> bool {
@@ -439,35 +519,45 @@ impl WorkflowManager {
         }
     }
 
-    pub async fn state_to_resource(&self, state: &WorkflowState) -> Option<WorkflowResource> {
-        let workflows = self.workflows.lock().await;
-        let workflow_def = workflows.get(&state.workflow_id)?;
-        let current_node = workflow_def.nodes.get(&state.current_node_id)?;
-
-        Some(WorkflowResource {
-            instance_id: state.instance_id.clone(),
-            current_node_id: state.current_node_id.clone(),
-            workflow_id: state.workflow_id.clone(),
-            name: current_node.title.clone(),
-            description: current_node.description.clone(),
-            responses: state.responses.clone(),
-            completed: state.completed,
-            complete_message: state.complete_message.clone(),
-            inputs: current_node.inputs.clone(),
-            actions: current_node.actions.clone(),
-            displays: current_node.displays.clone(),
-            layout: current_node.layout.clone(),
-            user_id: state.user_id.clone(),
-        })
-    }
+    // pub async fn state_to_resource(&self, state: &WorkflowState) -> Option<WorkflowResource> {
+    // }
 
     pub async fn get_workflow_resource(&self, instance_id: &str) -> Option<WorkflowResource> {
         let state = {
             let active_workflows = self.active_workflows.lock().await;
             active_workflows.get(instance_id)?.clone()
         };
+        let workflow_id = state.workflow_id.clone();
+        let current_node_id = state.current_node_id.clone();
 
-        self.state_to_resource(&state).await
+        let (current_node, completed) = {
+            let workflows = self.workflows.lock().await;
+            let workflow_def = workflows.get(&workflow_id)?;
+            let current_node = workflow_def.nodes.get(&current_node_id)?;
+            let completed = if state.completed {
+                true
+            } else {
+                current_node.actions.is_empty()
+            };
+            (current_node.clone(), completed)
+        };
+
+        Some(WorkflowResource {
+            instance_id: state.instance_id.clone(),
+            current_node_id: current_node.id.clone(),
+            workflow_id: state.workflow_id.clone(),
+            name: current_node.title.clone(),
+            description: current_node.description.clone(),
+            responses: state.responses.clone(),
+            completed,
+            complete_message: state.complete_message.clone(),
+            inputs: current_node.inputs.clone(),
+            actions: current_node.actions.clone(),
+            displays: current_node.displays.clone(),
+            layout: current_node.layout.clone(),
+            user_id: state.user_id.clone(),
+            waiting: state.waiting.clone(),
+        })
     }
 
     pub async fn list_user_workflow_resources(&self, user_id: &str) -> Vec<WorkflowResource> {
@@ -476,7 +566,7 @@ impl WorkflowManager {
         let mut resources = Vec::new();
         for state in active_workflows.values() {
             if state.user_id == user_id && !state.completed {
-                if let Some(resource) = self.state_to_resource(&state).await {
+                if let Some(resource) = self.get_workflow_resource(&state.instance_id).await {
                     resources.push(resource);
                 }
             }
@@ -492,6 +582,31 @@ impl WorkflowManager {
         state: &mut WorkflowState,
     ) -> Result<(), WorkflowError> {
         match result {
+            ServerActionResult::WaitForWorkflow {
+                inject_response_as,
+                inputs,
+                workflow_id: workflow_definition_id,
+            } => {
+                match self
+                    .start_workflow(workflow_definition_id, &state.user_id, inputs.clone())
+                    .await
+                {
+                    Ok(started_workflow_id) => {
+                        println!(
+                            "going to wait for {started_workflow_id} to finish before continuing with workflow {workflow_id}"
+                        );
+                        state.waiting = true;
+                        self.waiting_for_response.lock().await.insert(
+                            workflow_id.to_string(),
+                            (started_workflow_id.to_string(), inject_response_as.clone()),
+                        );
+                    }
+                    Err(e) => {
+                        eprintln!("Unable to start workflow {:?}", e);
+                        return Err(WorkflowError::WorkflowNotFound);
+                    }
+                }
+            }
             ServerActionResult::NextPage { page_id } => {
                 if let Some(node) = workflow_definition.nodes.get(page_id) {
                     state.node_history.push(state.current_node_id.clone());
@@ -549,30 +664,40 @@ impl WorkflowManager {
             .ok_or(WorkflowError::WorkflowNotFound)?
             .clone();
 
-        let mut workflows = self.active_workflows.lock().await;
-        let state = workflows
-            .get_mut(&instance_id)
-            .ok_or(WorkflowError::WorkflowNotFound)?;
+        let state = &mut {
+            let mut workflows = self.active_workflows.lock().await;
+            workflows
+                .get_mut(&instance_id)
+                .ok_or(WorkflowError::WorkflowNotFound)?
+                .clone()
+        };
 
         let context = ServerActionContext {
             action_id: action_id.to_string(),
             user_id: state.user_id.clone(),
             inputs: state.responses.clone(),
             workflow_id: state.workflow_id.clone(),
-            instance_id,
+            instance_id: instance_id.clone(),
         };
 
-        println!("hellooo");
         let result = handler(context)
             .await
             .map_err(|e| WorkflowError::ServerActionFailed(e.to_string()))?;
-        println!("world");
 
         // Process server action result
         self.process_server_action_results(&result, &workflow_definition, workflow_id, state)
             .await?;
 
         state.updated_at = chrono::Utc::now();
+
+        {
+            let mut workflows = self.active_workflows.lock().await;
+            if let Some(old_state) = workflows.get_mut(&instance_id) {
+                *old_state = state.clone();
+            } else {
+                return Err(WorkflowError::WorkflowNotFound);
+            }
+        }
 
         Ok(result)
     }

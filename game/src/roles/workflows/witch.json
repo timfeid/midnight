@@ -1,0 +1,48 @@
+{
+  "id": "witch_sabotage_workflow",
+  "name": "Witch Sabotage",
+  "description": "Sabotage a random role and trigger its workflow",
+  "initial_node_id": "start_node",
+  "nodes": {
+    "start_node": {
+      "id": "start_node",
+      "title": "Sabotaging...",
+      "description": "You are sabotaging a random role.",
+      "displays": [],
+      "inputs": [
+        {
+          "id": "sabotage_trigger",
+          "label": "Sabotaging Role",
+          "input_type": {
+            "ServerActionLoader": {
+              "target": "start_sabotaged_role_workflow"
+            }
+          },
+          "default_value": null,
+          "required": true,
+          "width": "full"
+        }
+      ],
+      "actions": [
+        {
+          "id": "start_sabotaged_role_workflow",
+          "label": "Start sabotage",
+          "action_type": "RunServerAction",
+          "target": "start_sabotaged_role_workflow",
+          "style": "primary"
+        }
+      ],
+      "layout": null,
+      "condition": "Always",
+      "parent_id": null
+    }
+  },
+  "responses": {},
+  "server_actions": {
+    "start_sabotaged_role_workflow": {
+      "id": "start_sabotaged_role_workflow",
+      "name": "Start Sabotaged Role Workflow",
+      "description": "Randomly select a role and trigger their workflow for the Witch"
+    }
+  }
+}

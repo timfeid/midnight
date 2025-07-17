@@ -4,6 +4,7 @@ use tokio::sync::Mutex;
 use crate::{
     gamestate::{ActionTarget, GameState, Player, RoleContext},
     roles::{doppelganger_card, seer_card, villager_card, werewolf_card, witch_card},
+    workflow::InputType,
 };
 
 pub mod error;
@@ -47,8 +48,7 @@ async fn main() {
         Player::new("middle3", "middle 3", Arc::new(villager1.clone())),
     ];
 
-    let kafka = KafkaService::new("test");
-    let state = GameState::new(players, middles, Arc::new(kafka)).await;
+    let state = GameState::new(players, middles).await;
     let (tx, mut rx) = broadcast::channel(16);
     let runner = GameRunner::new(state, tx.clone()).await;
     let runner_inner = runner.clone();
@@ -60,9 +60,43 @@ async fn main() {
                     player_id,
                     workflow,
                 } => {
-                    if &player_id == "werewolf" {
-                        println!("🔁 Workflow updated for {} : {:?}", player_id, workflow);
+                    if !workflow.waiting {
+                        for input in workflow.inputs.iter() {
+                            let runner_clone_inner = Arc::clone(&runner_inner);
+                            let player_id = player_id.clone();
+                            let workflow_instance_id = workflow.instance_id.clone();
+                            if let InputType::ServerActionLoader { target } = &input.input_type {
+                                let target = target.clone();
+                                println!("Sending back a server loader {target}");
+                                tokio::spawn(async move {
+                                    runner_clone_inner
+                                        .lock()
+                                        .await
+                                        .process_workflow_action(
+                                            &player_id,
+                                            ProcessWorkflowActionArgs::new(
+                                                workflow_instance_id,
+                                                target.into(),
+                                                HashMap::new(),
+                                            ),
+                                        )
+                                        .await
+                                        .expect("workflow action failed");
+                                });
+                                // Now you can use the `target` variable here
+                                // handle the case when found, e.g., println!("Found target: {:?}", target);
+                            }
+                        }
+                    }
 
+                    if &player_id == "witch" {
+                        println!(
+                            "🔁 Workflow updated for witch {} : {:?}",
+                            player_id, workflow
+                        );
+                    }
+
+                    if &player_id == "werewolf" {
                         let args = match workflow.current_node_id.as_str() {
                             "select_card_node" => {
                                 // Simulate selecting a card to view
@@ -91,9 +125,7 @@ async fn main() {
                                 .expect("workflow action failed");
                         });
                     }
-                    if &player_id == "seer" {
-                        println!("🔁 Workflow updated for {} : {:?}", player_id, workflow);
-
+                    if &workflow.workflow_id == "user-bot-wf-seer_ability_workflow" {
                         let args = match workflow.current_node_id.as_str() {
                             "select_card_node" => {
                                 // Simulate selecting a card to view
@@ -124,6 +156,7 @@ async fn main() {
 
                         let runner_clone = Arc::clone(&runner_inner);
                         tokio::spawn(async move {
+                            println!("processed action {:?}", args);
                             runner_clone
                                 .lock()
                                 .await

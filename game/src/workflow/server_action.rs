@@ -52,6 +52,11 @@ pub enum ServerActionResult {
         inputs: HashMap<String, Value>,
     },
     CancelWorkflow,
+    WaitForWorkflow {
+        workflow_id: String,
+        inputs: HashMap<String, Value>,
+        inject_response_as: Option<String>,
+    },
 }
 
 pub type ServerActionHandler = Box<

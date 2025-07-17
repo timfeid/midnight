@@ -1,8 +1,12 @@
+use rand::{SeedableRng, rngs::OsRng};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::{collections::HashMap, future::Future};
 
 use futures::lock::Mutex;
+use futures::stream::All;
+use rand::seq::IndexedRandom;
+use rand_chacha::{ChaCha12Rng, ChaCha20Rng};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, from_value, json};
 
@@ -302,17 +306,99 @@ pub fn villager_card() -> RoleCard {
 
 pub fn witch_card() -> RoleCard {
     RoleCard {
-        priority: 40,
-        register: None,
+        priority: 0,
+        register: Some(Arc::new(|game: Arc<Mutex<GameState>>| {
+            Box::pin(async move {
+                let game_for_server_action = Arc::clone(&game);
+                game.lock()
+                    .await
+                    .register_server_action(
+                        "start_sabotaged_role_workflow",
+                        Box::new(move |state| {
+                            let game_for_reveal_cards = Arc::clone(&game_for_server_action);
+                            Box::pin(async move {
+                                let roles: Vec<Arc<RoleCard>> = game_for_reveal_cards
+                                    .lock()
+                                    .await
+                                    .all_cards()
+                                    .iter()
+                                    .filter(|c| {
+                                        c.night_ability.is_some()
+                                            && c.alliance != Alliance::Werewolf
+                                            && c.name != "Witch".to_string()
+                                            && c.name == "Seer".to_string()
+                                    })
+                                    .cloned()
+                                    .collect::<Vec<_>>();
+
+                                let mut rng = ChaCha12Rng::from_os_rng();
+
+                                let maybe_selected = roles.choose(&mut rng);
+
+                                if let Some(role) = maybe_selected {
+                                    if let Some(night_ability) = &role.night_ability {
+                                        if let Some(workflow) = (night_ability)(RoleContext::new(
+                                            game_for_reveal_cards,
+                                            state.user_id,
+                                        ))
+                                        .await
+                                        {
+                                            println!("Starting workflow for {}", role.name);
+                                            return Ok(ServerActionResult::WaitForWorkflow {
+                                                workflow_id: workflow.definition,
+                                                inputs: workflow.input,
+                                                inject_response_as: Some(
+                                                    "witch_workflow_response".to_string(),
+                                                ),
+                                            });
+                                        } else {
+                                            println!("no workflow for {}", role.name);
+                                        }
+                                    } else {
+                                        println!("no night ability for {}", role.name);
+                                    }
+                                } else {
+                                    println!("no role?");
+                                }
+
+                                Ok(ServerActionResult::CompleteWorkflow {
+                                    responses: HashMap::new(),
+                                    message: "no".to_string(),
+                                })
+                            })
+                        }),
+                    )
+                    .await
+                    .expect("unable to register reveal cards workflow");
+
+                game.lock()
+                    .await
+                    .register_workflow_definition(
+                        serde_json::from_str::<CreateWorkflowDefinition>(include_str!(
+                            "workflows/witch.json"
+                        ))
+                        .unwrap(),
+                    )
+                    .await
+                    .expect("unable to register wf");
+            })
+        })),
         alliance: Alliance::Villager,
         name: "Witch".to_string(),
-        night_ability: Some(Arc::new(|ctx: RoleContext| Box::pin(async move { None }))),
+        night_ability: Some(Arc::new(|_ctx: RoleContext| {
+            Box::pin(async move {
+                Some(WorkflowDefinitionWithInput {
+                    definition: "user-bot-wf-witch_sabotage_workflow".to_string(),
+                    input: HashMap::new(),
+                })
+            })
+        })),
     }
 }
 
 pub fn doppelganger_card() -> RoleCard {
     RoleCard {
-        priority: 0,
+        priority: 5,
         alliance: Alliance::Villager,
         register: None,
         name: "Doppelgänger".to_string(),

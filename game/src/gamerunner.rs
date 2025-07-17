@@ -10,6 +10,7 @@ use tokio::sync::broadcast;
 
 use crate::gamestate::{ActionTarget, GameState, RoleContext};
 use crate::roles::{RoleAbility, RoleAbilitySpec, RoleCard};
+use crate::workflow::manager::WorkflowEvent;
 use crate::workflow::service::{ProcessWorkflowActionArgs, WorkflowResource};
 use crate::workflow::{DisplayType, WorkflowState};
 
@@ -70,12 +71,54 @@ impl GameRunner {
         all_abilities.sort_by_key(|(_, a)| a.priority);
         let stages = VecDeque::from(all_abilities);
 
-        Arc::new(Mutex::new(Self {
-            game,
+        let runner = Arc::new(Mutex::new(Self {
+            game: game.clone(),
             stages,
             event_sender,
             pending_actions: Arc::new(Mutex::new(HashMap::new())),
-        }))
+        }));
+
+        {
+            let game = game.lock().await;
+            let _workflow_inner = Arc::clone(&game.workflow);
+
+            let mut event_manager = game.workflow.manager.event_manager.lock().await;
+
+            let runner_inner = Arc::clone(&runner);
+            event_manager.on_event(Box::new(move |event| {
+                let event = event.clone();
+                let runner_inner = runner_inner.clone();
+                Box::pin(async move {
+                    match &event {
+                        WorkflowEvent::WorkflowUpdated { resource } => {
+                            runner_inner
+                                .lock()
+                                .await
+                                .event_sender
+                                .send(GameEvent::UpdateWorkflow {
+                                    player_id: resource.user_id.clone(),
+                                    workflow: resource.clone(),
+                                })
+                                .ok();
+                        }
+                        WorkflowEvent::WorkflowStarted { resource } => {
+                            runner_inner
+                                .lock()
+                                .await
+                                .event_sender
+                                .send(GameEvent::UpdateWorkflow {
+                                    player_id: resource.user_id.clone(),
+                                    workflow: resource.clone(),
+                                })
+                                .ok();
+                        }
+                        _ => {}
+                    }
+                })
+            }));
+        }
+
+        runner
     }
 
     // pub async fn submit_action(
@@ -111,13 +154,11 @@ impl GameRunner {
         args: ProcessWorkflowActionArgs,
     ) -> Result<(), String> {
         let workflow = { self.game.lock().await.workflow.clone() };
-        let instance = workflow
+        println!("hi");
+        workflow
             .process_action(player_id, args)
             .await
-            .map_err(|e| format!("Workflow processing error: {}", e))?;
-
-        self.update_workflow(player_id, instance).await;
-        Ok(())
+            .map_err(|e| format!("Workflow processing error: {}", e))
     }
 
     pub async fn play_ability(&self, player_id: &str, kind: PlayableAbility) -> Result<(), String> {
@@ -129,19 +170,18 @@ impl GameRunner {
         if let Some(ability) = action {
             let ctx = RoleContext::new(Arc::clone(&self.game), player_id.to_string());
             if let Some(workflow_definition_with_input) = (&ability)(ctx).await {
-                let workflow = self
-                    .game
+                self.game
                     .lock()
                     .await
-                    .start_workflow(player_id, workflow_definition_with_input)
+                    .workflow
+                    .manager
+                    .start_workflow(
+                        &workflow_definition_with_input.definition,
+                        player_id,
+                        workflow_definition_with_input.input,
+                    )
                     .await
                     .expect("hmm workflow problems");
-                self.event_sender
-                    .send(GameEvent::UpdateWorkflow {
-                        player_id: player_id.to_string(),
-                        workflow,
-                    })
-                    .ok();
             }
 
             self.event_sender
@@ -155,16 +195,7 @@ impl GameRunner {
     }
 
     pub async fn register_cards(&self) {
-        let all_cards = {
-            let game = self.game.lock().await;
-            let mut all_cards: Vec<_> = game
-                .players
-                .iter()
-                .map(|p| p.1.get_original_role_card())
-                .collect();
-            all_cards.extend(game.middles.iter().map(|p| p.1.get_original_role_card()));
-            all_cards
-        };
+        let all_cards = self.game.lock().await.all_cards();
         for player in all_cards.iter() {
             if let Some(register) = &player.register {
                 println!("registering {}", player.name);
@@ -179,6 +210,7 @@ impl GameRunner {
             let runner_guard = runner.lock().await;
             runner_guard.register_cards().await;
         }
+        println!("beforeloop {:?}", runner);
 
         loop {
             // STEP 1: Pop stage
@@ -236,21 +268,12 @@ impl GameRunner {
 
             // STEP 5: Start workflow if needed
             if let Some(input) = workflow_input {
-                let mut game = game_arc.lock().await;
-                let wf = game
-                    .start_workflow(&player_id, input)
+                let workflow = game_arc.lock().await.workflow.clone();
+                workflow
+                    .manager
+                    .start_workflow(&input.definition, &player_id, input.input)
                     .await
                     .expect("workflow start failed");
-
-                runner
-                    .lock()
-                    .await
-                    .event_sender
-                    .send(GameEvent::UpdateWorkflow {
-                        player_id: player_id.clone(),
-                        workflow: wf,
-                    })
-                    .ok();
             }
 
             // STEP 6: Sleep with no locks
@@ -289,106 +312,5 @@ impl GameRunner {
 
     async fn wait_for_turn(&self, duration: Duration) {
         sleep(duration).await;
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::{collections::HashMap, sync::Arc};
-
-    use serde_json::json;
-    use tokio::sync::broadcast;
-
-    use crate::{
-        gamerunner::{GameEvent, GameRunner},
-        gamestate::{ActionTarget, GameState, Player},
-        kafka::service::KafkaService,
-        roles::{doppelganger_card, seer_card, villager_card, witch_card},
-        workflow::service::ProcessWorkflowActionArgs,
-    };
-
-    #[tokio::test]
-    async fn test_workflow_progression() {
-        let mut dopple = doppelganger_card();
-        let mut witch = witch_card();
-        let villager1 = villager_card();
-        let villager2 = villager_card();
-        let mut seer = seer_card();
-
-        let players = vec![
-            Player::new("dopple", "Dopple Dan", Arc::new(dopple)),
-            Player::new("witch", "Witch Wanda", Arc::new(witch)),
-            Player::new("villager1", "Vince", Arc::new(villager1.clone())),
-            Player::new("villager2", "Violet", Arc::new(villager2)),
-            Player::new("seer", "Seer Sam", Arc::new(seer)),
-        ];
-
-        let middles = vec![
-            Player::new("middle1", "middle 1", Arc::new(villager1.clone())),
-            Player::new("middle2", "middle 2", Arc::new(villager1.clone())),
-            Player::new("middle3", "middle 3", Arc::new(villager1.clone())),
-        ];
-
-        let kafka = KafkaService::new("test");
-        let state = GameState::new(players, middles, Arc::new(kafka)).await;
-        let (tx, mut rx) = broadcast::channel(16);
-        let runner = GameRunner::new(state, tx.clone()).await;
-        let runner_inner = runner.clone();
-
-        tokio::spawn(async move {
-            while let Ok(event) = rx.recv().await {
-                match event {
-                    GameEvent::UpdateWorkflow {
-                        player_id,
-                        workflow,
-                    } => {
-                        println!("🔁 Workflow updated for {} : {:?}", player_id, workflow);
-
-                        let args = match workflow.current_node_id.as_str() {
-                            "select_card_node" => {
-                                // Simulate selecting a card to view
-                                let mut input = HashMap::new();
-                                input.insert(
-                                    "selected_card".to_string(),
-                                    json!({"type": "Player", "Player": {"id": "seer"}}),
-                                );
-                                println!("sending input back");
-                                ProcessWorkflowActionArgs::new(
-                                    workflow.instance_id,
-                                    "next".into(),
-                                    input,
-                                )
-                            }
-                            "prompt_player_reveal" => {
-                                // Simulate selecting a card to view
-                                let input = HashMap::new();
-                                println!("want to send next again");
-                                ProcessWorkflowActionArgs::new(
-                                    workflow.instance_id,
-                                    "next".into(),
-                                    input,
-                                )
-                            }
-                            _ => continue,
-                        };
-
-                        let runner_clone = Arc::clone(&runner_inner);
-                        tokio::spawn(async move {
-                            println!("runner {:?}", runner_clone);
-                            runner_clone
-                                .lock()
-                                .await
-                                .process_workflow_action(&player_id, args)
-                                .await
-                                .expect("workflow action failed");
-                        });
-                    }
-
-                    _ => {}
-                }
-            }
-        });
-
-        GameRunner::run(runner.clone()).await;
     }
 }

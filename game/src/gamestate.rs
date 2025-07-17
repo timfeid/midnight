@@ -9,7 +9,7 @@ use crate::{
     roles::{RoleAbility, RoleAbilitySpec, RoleCard, WorkflowDefinitionWithInput},
     workflow::{
         CreateWorkflowDefinition,
-        manager::WorkflowManager,
+        manager::{WorkflowEvent, WorkflowManager},
         server_action::{ServerActionContext, ServerActionHandler, ServerActionResult},
         service::{WorkflowResource, WorkflowService},
     },
@@ -86,7 +86,7 @@ pub struct GameState {
 }
 
 impl GameState {
-    pub async fn new(players: Vec<Player>, middles: Vec<Player>, kafka: Arc<KafkaService>) -> Self {
+    pub async fn new(players: Vec<Player>, middles: Vec<Player>) -> Self {
         let mut middles_map = HashMap::new();
         for player in middles {
             middles_map.insert(player.id.clone(), player);
@@ -95,12 +95,30 @@ impl GameState {
         for player in players {
             map.insert(player.id.clone(), player);
         }
+
+        let workflow_service = WorkflowService::new().await;
+        let workflow = Arc::new(workflow_service);
+
         GameState {
             role_contexts: Arc::new(Mutex::new(HashMap::new())),
             players: map,
             middles: middles_map,
-            workflow: Arc::new(WorkflowService::new(kafka).await),
+            workflow,
         }
+    }
+
+    pub fn all_cards(&self) -> Vec<Arc<RoleCard>> {
+        let mut all_cards = {
+            let mut all_cards: Vec<_> = self
+                .players
+                .iter()
+                .map(|p| p.1.get_original_role_card())
+                .collect();
+            all_cards.extend(self.middles.iter().map(|p| p.1.get_original_role_card()));
+            all_cards
+        };
+        all_cards.sort_by_key(|card| card.priority);
+        all_cards
     }
 
     pub async fn register_workflow_definition(
@@ -117,19 +135,6 @@ impl GameState {
 
     pub async fn get_context(&self, player_id: &str) -> Option<RoleContext> {
         self.role_contexts.lock().await.get(player_id).cloned()
-    }
-
-    pub async fn start_workflow(
-        &mut self,
-        player_id: &str,
-        config: WorkflowDefinitionWithInput,
-    ) -> AppResult<WorkflowResource> {
-        let resource = self
-            .workflow
-            .start_workflow(&config.definition, player_id, config.input)
-            .await?;
-
-        Ok(resource)
     }
 
     pub async fn register_server_action(

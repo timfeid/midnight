@@ -17,6 +17,7 @@ pub enum CardFilter {
 #[derive(Type, Debug, Clone, Serialize, Deserialize)]
 pub enum InputType {
     SelectCard { filter: CardFilter },
+    ServerActionLoader { target: String },
 }
 
 #[derive(Type, Debug, Clone, Serialize, Deserialize)]
@@ -236,6 +237,7 @@ pub struct WorkflowState {
     pub responses: HashMap<String, serde_json::Value>,
     pub message_id: Option<String>,
     pub completed: bool,
+    pub waiting: bool,
     pub complete_message: Option<String>,
     #[serde(skip_serializing, skip_deserializing)]
     pub created_at: chrono::DateTime<chrono::Utc>,

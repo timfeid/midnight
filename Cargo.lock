@@ -241,6 +241,8 @@ dependencies = [
  "chrono",
  "futures",
  "futures-util",
+ "rand",
+ "rand_chacha",
  "rdkafka",
  "serde",
  "serde_json",
