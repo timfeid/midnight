@@ -180,6 +180,14 @@ pub enum ActionType {
 }
 
 #[derive(Type, Debug, Clone, Serialize, Deserialize)]
+pub enum WorkflowPredicate {
+    ByUserId(String),
+    // ByNodeId(String),
+    // And(Vec<WorkflowPredicate>),
+    // Or(Vec<WorkflowPredicate>),
+}
+
+#[derive(Type, Debug, Clone, Serialize, Deserialize)]
 pub enum NodeCondition {
     // Check if response field exists
     ResponseExists(String),

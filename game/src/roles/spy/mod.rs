@@ -8,6 +8,7 @@ use serde_json::json;
 use crate::error::ServicesError;
 use crate::roles::{Alliance, RoleCard, WorkflowDefinitionWithInput};
 use crate::workflow::server_action::ServerActionResult;
+use crate::workflow::{ActionType, WorkflowPredicate};
 use crate::{
     gamestate::{GameState, RoleContext},
     workflow::CreateWorkflowDefinition,
@@ -38,7 +39,7 @@ async fn register_start_role_workflow(game: Arc<Mutex<GameState>>) {
                         .find(|r| r.name == chosen_role_name)
                         .cloned();
 
-                    let Some(role) = selected else {
+                    let Some(role) = &selected else {
                         return Ok(ServerActionResult::CompleteWorkflow {
                             message: "Invalid role selected.".into(),
                             responses: HashMap::new(),
@@ -60,11 +61,22 @@ async fn register_start_role_workflow(game: Arc<Mutex<GameState>>) {
                         });
                     };
 
-                    Ok(ServerActionResult::WaitForWorkflow {
-                        workflow_id: workflow.definition,
-                        inputs: workflow.input,
-                        inject_response_as: Some("observed_results".to_string()),
-                    })
+                    if let Some(player) = lock.get_player_by_role(chosen_role_name).await.ok() {
+                        if player.middle_position.is_none() {
+                            return Ok(ServerActionResult::WaitForPredicate {
+                                predicate: WorkflowPredicate::ByUserId(player.id),
+                                inject_response_as: Some("observed_results".to_string()),
+                                on_complete: Some(ActionType::NextNode),
+                            });
+                        }
+                    }
+
+                    let mut input = HashMap::new();
+                    input.insert(
+                        "observed_results".to_string(),
+                        json!("Better luck next time"),
+                    );
+                    Ok(ServerActionResult::UpdateResponses(input))
                 })
             }),
         )

@@ -5,7 +5,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use specta::Type;
 
-use crate::error::{AppResult, ServicesError};
+use crate::{
+    error::{AppResult, ServicesError},
+    workflow::{ActionType, WorkflowPredicate},
+};
 
 #[derive(Debug, Clone)]
 pub struct ServerActionContext {
@@ -74,10 +77,16 @@ pub enum ServerActionResult {
         inputs: HashMap<String, Value>,
     },
     CancelWorkflow,
-    WaitForWorkflow {
-        workflow_id: String,
+    StartAndWaitWorkflow {
         inputs: HashMap<String, Value>,
+        definition_id: String,
         inject_response_as: Option<String>,
+        on_complete: Option<ActionType>,
+    },
+    WaitForPredicate {
+        predicate: WorkflowPredicate,
+        inject_response_as: Option<String>,
+        on_complete: Option<ActionType>,
     },
 }
 

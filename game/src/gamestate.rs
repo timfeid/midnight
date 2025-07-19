@@ -198,6 +198,18 @@ impl GameState {
         self.role_contexts.lock().await.insert(player_id, ctx);
     }
 
+    pub async fn get_player_by_role(&self, role: &str) -> AppResult<Player> {
+        Ok(self
+            .players
+            .values()
+            .into_iter()
+            .find(|p| p.effective_role_card().name.as_str() == role)
+            .ok_or(ServicesError::InternalError(format!(
+                "Unable to find player with role {role}"
+            )))?
+            .clone())
+    }
+
     pub async fn get_player(&self, player_id: &str) -> AppResult<Player> {
         Ok(self
             .players

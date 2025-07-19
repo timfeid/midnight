@@ -39,6 +39,26 @@
       "layout": null,
       "condition": "Always",
       "parent_id": null
+    },
+    "watch_complete": {
+      "id": "watch_complete",
+      "title": "Observation Complete",
+      "description": "You watched the chosen role perform their night ability.",
+      "displays": [
+        {
+          "id": "summary",
+          "display_type": {
+            "Text": {
+              "text_key": "summary"
+            }
+          }
+        }
+      ],
+      "inputs": [],
+      "actions": [],
+      "layout": null,
+      "condition": "Always",
+      "parent_id": "select_role"
     }
   },
   "responses": {},

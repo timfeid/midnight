@@ -39,7 +39,7 @@ async fn main() {
 
     let players = vec![
         Player::new("dopple", "Dopple Dan", Arc::new(dopple), None),
-        Player::new("witch", "Witch Wanda", Arc::new(witch), None),
+        // Player::new("witch", "Witch Wanda", Arc::new(witch), None),
         Player::new("werewolf", "Vince", Arc::new(werewolf.clone()), None),
         Player::new("spy", "Violet", Arc::new(spy), None),
         Player::new("seer", "Seer Sam", Arc::new(seer), None),
@@ -65,7 +65,7 @@ async fn main() {
                         println!("workflow complete");
                         continue;
                     }
-                    let mut should_continue = true;
+                    let mut should_continue = !workflow.waiting;
                     if !workflow.waiting {
                         for input in workflow.inputs.iter() {
                             let runner_clone_inner = Arc::clone(&runner_inner);
@@ -125,13 +125,42 @@ async fn main() {
                                 .expect("workflow action failed");
                         });
                     }
+
+                    if &workflow.workflow_id == "user-bot-wf-spy_observe_workflow" {
+                        let args = match workflow.current_node_id.as_str() {
+                            "select_role" => {
+                                let mut input = HashMap::new();
+                                input.insert("chosen_role".to_string(), json!("Seer"));
+                                ProcessWorkflowActionArgs::new(
+                                    workflow.instance_id.clone(),
+                                    "next".into(),
+                                    input,
+                                )
+                            }
+                            _ => continue,
+                        };
+
+                        let runner_clone = Arc::clone(&runner_inner);
+                        let player_id = player_id.clone();
+                        tokio::spawn(async move {
+                            println!("Spy observing role...");
+                            runner_clone
+                                .lock()
+                                .await
+                                .process_workflow_action(&player_id, args.clone())
+                                .await
+                                .expect("spy observe action failed");
+                            println!("Spy finished action {:?}", args.action_id);
+                        });
+                    }
+
                     if &workflow.workflow_id == "user-bot-wf-seer_ability_workflow" {
                         let args = match workflow.current_node_id.as_str() {
                             "select_card_node" => {
                                 let mut input = HashMap::new();
                                 input.insert(
                                     "selected_card".to_string(),
-                                    json!({"type": "Player", "Player": {"id": "witch"}}),
+                                    json!({"type": "Player", "Player": {"id": "seer"}}),
                                 );
                                 ProcessWorkflowActionArgs::new(
                                     workflow.instance_id.clone(),

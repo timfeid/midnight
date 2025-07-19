@@ -73,10 +73,11 @@ async fn register_start_sabotaged_role_workflow(game: Arc<Mutex<GameState>>) {
                     };
 
                     tracing::info!(role = %selected.name, "Launching sabotage workflow");
-                    Ok(ServerActionResult::WaitForWorkflow {
-                        workflow_id: workflow.definition,
+                    Ok(ServerActionResult::StartAndWaitWorkflow {
+                        definition_id: workflow.definition,
                         inputs: workflow.input,
                         inject_response_as: None,
+                        on_complete: None,
                     })
                 })
             }),

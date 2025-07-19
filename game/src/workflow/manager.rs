@@ -4,6 +4,8 @@ use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::Mutex;
 
+use crate::workflow::WorkflowPredicate;
+
 use super::server_action::{ServerActionContext, ServerActionHandler, ServerActionResult};
 use super::service::WorkflowResource;
 use super::{
@@ -117,6 +119,7 @@ pub struct WorkflowManager {
     user_preferences: Arc<Mutex<HashMap<(String, String), UserWorkflowPreferences>>>,
     server_action_handlers: Arc<Mutex<HashMap<String, ServerActionHandler>>>,
     waiting_for_response: Arc<Mutex<HashMap<String, (String, Option<String>)>>>,
+    waiting_for_predicate: Arc<Mutex<HashMap<String, (WorkflowPredicate, Option<String>)>>>,
     pub(crate) external_server_actions: Arc<Mutex<HashSet<(String, String)>>>,
     pub event_manager: Arc<Mutex<EventManager>>, // Add event manager to WorkflowManager
 }
@@ -159,6 +162,7 @@ impl WorkflowManager {
             server_action_handlers: Arc::new(Mutex::new(HashMap::new())),
             external_server_actions: Arc::new(Mutex::new(HashSet::new())),
             waiting_for_response: Arc::new(Mutex::new(HashMap::new())),
+            waiting_for_predicate: Arc::new(Mutex::new(HashMap::new())),
             event_manager: Arc::new(Mutex::new(EventManager::new())),
         }
     }
@@ -172,6 +176,7 @@ impl WorkflowManager {
         if !resource.completed {
             return;
         }
+        println!("checking for waiting within {:?}", resource);
 
         let response = self.waiting_for_response.lock().await.remove(instance_id);
         println!("Response: {:?}", response);
@@ -226,6 +231,69 @@ impl WorkflowManager {
                 }
             }
 
+            let resource = self
+                .get_workflow_resource(&waiting_instance_id)
+                .await
+                .expect("Not found??");
+            self.event_manager.lock().await.workflow_updated(resource);
+            println!("Refreshed {waiting_instance_id}");
+        }
+
+        let response = self
+            .waiting_for_predicate
+            .lock()
+            .await
+            .clone()
+            .into_iter()
+            .find(|(key, (predicate, response_key))| match predicate {
+                WorkflowPredicate::ByUserId(user_id) => &resource.user_id == user_id,
+            });
+
+        println!("found predicate? {:?}", response);
+
+        if let Some((waiting_instance_id, (_, input_key))) = response {
+            let state = {
+                if let Some(state) = self
+                    .active_workflows
+                    .lock()
+                    .await
+                    .get_mut(&waiting_instance_id)
+                {
+                    state.waiting = false;
+
+                    if let Some(key) = input_key {
+                        let resource_value = serde_json::to_value(&resource.responses)
+                            .expect("Failed to serialize WorkflowResource");
+                        state.responses.insert(key, resource_value);
+                    }
+
+                    let workflow_definition = {
+                        let wf = self.workflows.lock().await;
+                        wf.get(&state.workflow_id)
+                            .expect("Unable to find workflow definition")
+                            .clone()
+                    };
+                    let current_node = workflow_definition
+                        .nodes
+                        .get(&state.current_node_id)
+                        .expect("what");
+                    let valid_child = self
+                        .find_valid_child_node(&workflow_definition, current_node, &state)
+                        .expect("No next child found");
+                    state.node_history.push(state.current_node_id.clone());
+                    state.current_node_id = valid_child.id.clone();
+                    state.updated_at = chrono::Utc::now();
+
+                    Some(state.clone())
+                } else {
+                    None
+                }
+            };
+            if let Some(state) = state {
+                self.update_state(&waiting_instance_id, state)
+                    .await
+                    .expect("unable to update state");
+            }
             let resource = self
                 .get_workflow_resource(&waiting_instance_id)
                 .await
@@ -689,10 +757,27 @@ impl WorkflowManager {
     ) -> Result<bool, WorkflowError> {
         let mut send_refresh = false;
         match result {
-            ServerActionResult::WaitForWorkflow {
+            ServerActionResult::WaitForPredicate {
+                inject_response_as,
+                predicate,
+                on_complete,
+            } => {
+                println!(
+                    "going to wait for {:?} before continuing with workflow {workflow_id}",
+                    predicate
+                );
+                state.waiting = true;
+                self.waiting_for_predicate.lock().await.insert(
+                    workflow_id.to_string(),
+                    (predicate.clone(), inject_response_as.clone()),
+                );
+                send_refresh = true;
+            }
+            ServerActionResult::StartAndWaitWorkflow {
                 inject_response_as,
                 inputs,
-                workflow_id: workflow_definition_id,
+                definition_id: workflow_definition_id,
+                on_complete,
             } => {
                 match self
                     .start_workflow(workflow_definition_id, &state.user_id, inputs.clone())
