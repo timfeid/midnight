@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use specta::Type;
 
+use crate::error::{AppResult, ServicesError};
+
 #[derive(Debug, Clone)]
 pub struct ServerActionContext {
     pub workflow_id: String,
@@ -15,7 +17,21 @@ pub struct ServerActionContext {
 }
 
 impl ServerActionContext {
-    fn get_nested_value<'a>(
+    pub fn get_required_nested_value_as_str<'a>(
+        map: &'a HashMap<String, serde_json::Value>,
+        dotted_path: &str,
+    ) -> AppResult<&'a str> {
+        let value = Self::get_nested_value(map, dotted_path);
+
+        return value
+            .and_then(|x| x.as_str())
+            .ok_or(ServicesError::InternalError(format!(
+                "{dotted_path} not found in {:?}",
+                map
+            )));
+    }
+
+    pub fn get_nested_value<'a>(
         map: &'a HashMap<String, serde_json::Value>,
         dotted_path: &str,
     ) -> Option<&'a serde_json::Value> {
@@ -34,6 +50,12 @@ impl ServerActionContext {
     }
     pub fn get_input(&self, path: &str) -> Option<&Value> {
         Self::get_nested_value(&self.inputs, path)
+    }
+
+    pub fn get_required_input_as_str(&self, key: &str) -> AppResult<&str> {
+        self.get_input(key)
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ServicesError::InternalError(format!("Missing or invalid input: {key}")))
     }
 }
 

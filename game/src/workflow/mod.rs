@@ -16,8 +16,18 @@ pub enum CardFilter {
 
 #[derive(Type, Debug, Clone, Serialize, Deserialize)]
 pub enum InputType {
-    SelectCard { filter: CardFilter },
-    ServerActionLoader { target: String },
+    SelectCard {
+        filter: CardFilter,
+    },
+    ServerActionLoader {
+        target: String,
+    },
+    SelectFromList {
+        items_key: String,
+        r#as: String,
+        layout: HashMap<Breakpoint, u8>,
+        content: Vec<DisplayType>,
+    },
 }
 
 #[derive(Type, Debug, Clone, Serialize, Deserialize)]

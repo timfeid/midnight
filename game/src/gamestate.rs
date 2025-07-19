@@ -1,17 +1,16 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use futures::{future::BoxFuture, lock::Mutex};
+use futures::lock::Mutex;
+use rand::{SeedableRng, seq::IndexedRandom};
+use rand_chacha::ChaCha12Rng;
+use serde_json::Value;
 
 use crate::{
-    error::AppResult,
-    kafka::service::KafkaService,
-    roles::{RoleAbility, RoleAbilitySpec, RoleCard, WorkflowDefinitionWithInput},
+    error::{AppResult, ServicesError},
+    roles::{Alliance, RoleCard},
     workflow::{
-        CreateWorkflowDefinition,
-        manager::{WorkflowEvent, WorkflowManager},
-        server_action::{ServerActionContext, ServerActionHandler, ServerActionResult},
-        service::{WorkflowResource, WorkflowService},
+        CreateWorkflowDefinition, server_action::ServerActionHandler, service::WorkflowService,
     },
 };
 
@@ -22,15 +21,22 @@ pub struct Player {
     pub role_card: Arc<RoleCard>,
     pub copied_role_card: Option<Arc<RoleCard>>,
     pub is_alive: bool,
+    pub middle_position: Option<usize>,
 }
 impl Player {
-    pub fn new(id: &str, name: &str, role_card: Arc<RoleCard>) -> Player {
+    pub fn new(
+        id: &str,
+        name: &str,
+        role_card: Arc<RoleCard>,
+        middle_position: Option<usize>,
+    ) -> Player {
         Player {
             id: id.to_owned(),
             name: name.to_owned(),
             role_card,
             copied_role_card: None,
             is_alive: true,
+            middle_position,
         }
     }
     pub fn effective_role_card(&self) -> Arc<RoleCard> {
@@ -66,9 +72,15 @@ impl RoleContext {
     }
 
     /// Get a reference to the actor player from the game
-    pub async fn get_player(&self) -> Option<Player> {
+    pub async fn get_player(&self) -> AppResult<Player> {
         let game = self.game.lock().await;
-        game.players.get(&self.user_id).cloned()
+        game.players
+            .get(&self.user_id)
+            .cloned()
+            .ok_or(ServicesError::InternalError(format!(
+                "no player {}",
+                self.user_id
+            )))
     }
 
     /// Return a clone of the shared game Arc
@@ -80,17 +92,38 @@ impl RoleContext {
 #[derive(Debug, Clone)]
 pub struct GameState {
     pub players: HashMap<String, Player>,
-    pub middles: HashMap<String, Player>,
     pub workflow: Arc<WorkflowService>,
     pub role_contexts: Arc<Mutex<HashMap<String, RoleContext>>>,
+    sabotaged_inputs: HashMap<(String, String), HashMap<String, Value>>,
 }
 
 impl GameState {
-    pub async fn new(players: Vec<Player>, middles: Vec<Player>) -> Self {
-        let mut middles_map = HashMap::new();
-        for player in middles {
-            middles_map.insert(player.id.clone(), player);
-        }
+    pub async fn get_sabotage_candidates(
+        &self,
+        exclude_names: &[&str],
+        only_name: Option<&str>,
+    ) -> Vec<Arc<RoleCard>> {
+        self.all_cards()
+            .iter()
+            .filter(|card| {
+                card.night_ability.is_some()
+                    && card.alliance != Alliance::Werewolf
+                    && !exclude_names.contains(&card.name.as_str())
+                    && only_name.map_or(true, |n| card.name == n)
+            })
+            .cloned()
+            .collect()
+    }
+
+    pub async fn pick_random_role<'a>(
+        &'a self,
+        roles: &'a [Arc<RoleCard>],
+    ) -> Option<&'a Arc<RoleCard>> {
+        let mut rng = ChaCha12Rng::from_os_rng();
+        roles.choose(&mut rng)
+    }
+
+    pub async fn new(players: Vec<Player>) -> Self {
         let mut map = HashMap::new();
         for player in players {
             map.insert(player.id.clone(), player);
@@ -102,20 +135,52 @@ impl GameState {
         GameState {
             role_contexts: Arc::new(Mutex::new(HashMap::new())),
             players: map,
-            middles: middles_map,
             workflow,
+            sabotaged_inputs: HashMap::new(),
         }
     }
 
+    pub async fn set_sabotage_inputs(
+        &mut self,
+        user_id: &str,
+        workflow_id: &str,
+        inputs: HashMap<String, Value>,
+    ) {
+        self.sabotaged_inputs
+            .insert((user_id.to_string(), workflow_id.to_string()), inputs);
+    }
+
+    pub async fn get_sabotage_inputs(
+        &self,
+        user_id: &str,
+        workflow_id: &str,
+    ) -> Option<HashMap<String, Value>> {
+        self.sabotaged_inputs
+            .get(&(user_id.to_string(), workflow_id.to_string()))
+            .cloned()
+    }
+
+    pub async fn get_user_effective_role(&self, user_id: &str) -> AppResult<Arc<RoleCard>> {
+        if let Ok(player) = self.get_player(user_id).await {
+            return Ok(player.effective_role_card());
+        }
+
+        Err(ServicesError::InternalError(format!(
+            "Unable to find player or middle with id {user_id}"
+        )))
+    }
+
+    pub async fn clear_sabotage_inputs(&mut self, user_id: &str, workflow_id: &str) {
+        self.sabotaged_inputs
+            .remove(&(user_id.to_string(), workflow_id.to_string()));
+    }
+
     pub fn all_cards(&self) -> Vec<Arc<RoleCard>> {
-        let mut all_cards = {
-            let mut all_cards: Vec<_> = self
-                .players
+        let mut all_cards: Vec<Arc<RoleCard>> = {
+            self.players
                 .iter()
                 .map(|p| p.1.get_original_role_card())
-                .collect();
-            all_cards.extend(self.middles.iter().map(|p| p.1.get_original_role_card()));
-            all_cards
+                .collect()
         };
         all_cards.sort_by_key(|card| card.priority);
         all_cards
@@ -133,8 +198,23 @@ impl GameState {
         self.role_contexts.lock().await.insert(player_id, ctx);
     }
 
-    pub async fn get_context(&self, player_id: &str) -> Option<RoleContext> {
-        self.role_contexts.lock().await.get(player_id).cloned()
+    pub async fn get_player(&self, player_id: &str) -> AppResult<Player> {
+        Ok(self
+            .players
+            .get(player_id)
+            .ok_or(ServicesError::InternalError(format!(
+                "Unable to find player with id {player_id}"
+            )))?
+            .clone())
+    }
+
+    pub async fn get_context(&self, player_id: &str) -> AppResult<RoleContext> {
+        self.role_contexts
+            .lock()
+            .await
+            .get(player_id)
+            .cloned()
+            .ok_or(ServicesError::InternalError("something".to_string()))
     }
 
     pub async fn register_server_action(
@@ -142,8 +222,13 @@ impl GameState {
         action_id: &str,
         handler: ServerActionHandler,
     ) -> AppResult<()> {
-        self.workflow
+        let response = self
+            .workflow
             .register_server_action(action_id, handler)
-            .await
+            .await?;
+
+        println!("Registered server action {action_id}");
+
+        Ok(response)
     }
 }

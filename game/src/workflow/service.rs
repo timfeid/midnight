@@ -8,7 +8,7 @@ use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use crate::{
     error::{AppResult, ServicesError},
-    workflow::server_action::ServerActionHandler,
+    workflow::{manager::WorkflowError, server_action::ServerActionHandler},
 };
 
 use super::{
@@ -81,12 +81,33 @@ impl WorkflowService {
     pub async fn new() -> Self {
         let manager = WorkflowManager::new();
 
-        Self {
+        let service = Self {
             manager: Arc::new(manager),
 
             external_action_responses: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             waiting_for_response: Arc::new(Mutex::new(HashMap::new())),
-        }
+        };
+
+        let manager = service.manager.clone();
+        service
+            .manager
+            .event_manager
+            .lock()
+            .await
+            .on_event(Box::new(move |event| {
+                let event = event.clone();
+                let manager_inner = manager.clone();
+                Box::pin(async move {
+                    match &event {
+                        WorkflowEvent::WorkflowUpdated { resource } => {
+                            manager_inner.check_for_waiting(&resource.instance_id).await
+                        }
+                        _ => {}
+                    }
+                })
+            }));
+
+        service
     }
 
     pub async fn register_server_action(
@@ -185,9 +206,8 @@ impl WorkflowService {
             .process_action(args.instance_id.clone(), &args.action_id, args.inputs)
             .await
             .map_err(ServicesError::from)?;
-        println!("hi2");
+        println!("Executing action {:?}", action);
 
-        println!("should refresh .. ? {:?}", action);
         match action {
             ActionProcessResult::ExternalServerActionStarted { action_id, id, .. } => {
                 let resource = self.get_workflow_resource(&args.instance_id).await?;
@@ -197,6 +217,9 @@ impl WorkflowService {
                     resource.clone(),
                     action_id,
                 );
+            }
+            ActionProcessResult::ShowNode { node_id: id } => {
+                self.manager.show_node(&args.instance_id, &id).await?;
             }
             ActionProcessResult::StartNewWorkflow {
                 workflow_id,
@@ -216,10 +239,8 @@ impl WorkflowService {
                     .execute_server_action(args.instance_id.clone(), &workflow_id, &action_id)
                     .await?;
             }
-            // Handle other action types as needed
             _ => {}
         };
-        println!("hi3");
 
         Ok(())
     }
@@ -279,6 +300,7 @@ impl WorkflowService {
 
             // Set up the timeout
             let timeout_future = tokio::time::timeout(std::time::Duration::from_secs(10), rx);
+            let mut refresh = false;
 
             match timeout_future.await {
                 Ok(Ok(result)) => {
@@ -310,7 +332,8 @@ impl WorkflowService {
                             {
                                 Ok(_) => println!("success"),
                                 Err(e) => println!("uh oh!!! {}", e),
-                            }
+                            };
+                            refresh = true;
 
                             println!("4");
                             let mut active_workflows = manager.active_workflows.lock().await;
@@ -338,7 +361,9 @@ impl WorkflowService {
                     wf.and_then(|w| Some(w.current_node_id.clone()))
                 );
             };
-            manager.event_manager.lock().await.workflow_updated(updated);
+            if refresh {
+                manager.event_manager.lock().await.workflow_updated(updated);
+            }
         });
     }
 }

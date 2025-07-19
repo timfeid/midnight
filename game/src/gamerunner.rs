@@ -3,16 +3,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::lock::Mutex;
-use serde_json::json;
 use tokio::time::sleep;
 
 use tokio::sync::broadcast;
 
-use crate::gamestate::{ActionTarget, GameState, RoleContext};
+use crate::gamestate::{GameState, RoleContext};
 use crate::roles::{RoleAbility, RoleAbilitySpec, RoleCard};
 use crate::workflow::manager::WorkflowEvent;
 use crate::workflow::service::{ProcessWorkflowActionArgs, WorkflowResource};
-use crate::workflow::{DisplayType, WorkflowState};
 
 #[derive(Debug, Clone)]
 pub enum GameEvent {
@@ -139,22 +137,12 @@ impl GameRunner {
     //     Ok(())
     // }
 
-    pub async fn update_workflow(&self, player_id: &str, workflow: WorkflowResource) {
-        self.event_sender
-            .send(GameEvent::UpdateWorkflow {
-                player_id: player_id.to_string(),
-                workflow,
-            })
-            .ok();
-    }
-
     pub async fn process_workflow_action(
         &self,
         player_id: &str,
         args: ProcessWorkflowActionArgs,
     ) -> Result<(), String> {
         let workflow = { self.game.lock().await.workflow.clone() };
-        println!("hi");
         workflow
             .process_action(player_id, args)
             .await

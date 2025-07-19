@@ -35,6 +35,58 @@
       "layout": null,
       "condition": "Always",
       "parent_id": null
+    },
+    "load_results": {
+      "id": "load_results",
+      "title": "You sabotaged",
+      "description": "",
+      "displays": [],
+      "inputs": [
+        {
+          "id": "sabotage_results",
+          "label": "Loading results",
+          "input_type": {
+            "ServerActionLoader": {
+              "target": "show_sabotaged_results_workflow"
+            }
+          },
+          "default_value": null,
+          "required": true,
+          "width": "full"
+        }
+      ],
+      "actions": [
+        {
+          "id": "show_sabotaged_results_workflow",
+          "label": "Start sabotage",
+          "action_type": "RunServerAction",
+          "target": "show_sabotaged_results_workflow",
+          "style": "primary"
+        }
+      ],
+      "layout": null,
+      "condition": "Always",
+      "parent_id": "start_node"
+    },
+    "display_results": {
+      "id": "display_results",
+      "title": "You sabotaged",
+      "description": "",
+      "displays": [
+        {
+          "id": "results",
+          "display_type": {
+            "Text": {
+              "text_key": "results"
+            }
+          }
+        }
+      ],
+      "inputs": [],
+      "actions": [],
+      "layout": null,
+      "condition": "Always",
+      "parent_id": "load_results"
     }
   },
   "responses": {},

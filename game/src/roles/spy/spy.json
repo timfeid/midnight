@@ -1,0 +1,52 @@
+{
+  "id": "spy_observe_workflow",
+  "name": "Spy Ability",
+  "description": "Choose a role to observe. You’ll see what that role sees during the night.",
+  "initial_node_id": "select_role",
+  "nodes": {
+    "select_role": {
+      "id": "select_role",
+      "title": "Pick a Role to Observe",
+      "description": "Choose a role to impersonate and observe its ability.",
+      "displays": [],
+      "inputs": [
+        {
+          "id": "chosen_role",
+          "label": "Which role do you want to observe?",
+          "input_type": {
+            "SelectFromList": {
+              "items_key": "",
+              "as": "",
+              "layout": {
+                "Sm": 1
+              },
+              "content": []
+            }
+          },
+          "required": true,
+          "width": "full"
+        }
+      ],
+      "actions": [
+        {
+          "id": "next",
+          "label": "Observe Role",
+          "action_type": "RunServerAction",
+          "target": "start_selected_role_workflow",
+          "style": "primary"
+        }
+      ],
+      "layout": null,
+      "condition": "Always",
+      "parent_id": null
+    }
+  },
+  "responses": {},
+  "server_actions": {
+    "start_selected_role_workflow": {
+      "id": "start_selected_role_workflow",
+      "name": "Run Role Workflow",
+      "description": "Start the workflow of the chosen role."
+    }
+  }
+}

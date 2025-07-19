@@ -3,7 +3,10 @@ use tokio::sync::Mutex;
 
 use crate::{
     gamestate::{ActionTarget, GameState, Player, RoleContext},
-    roles::{doppelganger_card, seer_card, villager_card, werewolf_card, witch_card},
+    roles::{
+        doppelganger_card, seer::seer_card, spy::spy_card, villager_card, werewolf::werewolf_card,
+        witch::witch_card,
+    },
     workflow::InputType,
 };
 
@@ -32,23 +35,20 @@ async fn main() {
     let mut witch = witch_card();
     let villager1 = villager_card();
     let werewolf = werewolf_card();
-    let villager2 = villager_card();
+    let spy = spy_card();
 
     let players = vec![
-        Player::new("dopple", "Dopple Dan", Arc::new(dopple)),
-        Player::new("witch", "Witch Wanda", Arc::new(witch)),
-        Player::new("werewolf", "Vince", Arc::new(werewolf.clone())),
-        Player::new("villager2", "Violet", Arc::new(villager2)),
-        Player::new("seer", "Seer Sam", Arc::new(seer)),
+        Player::new("dopple", "Dopple Dan", Arc::new(dopple), None),
+        Player::new("witch", "Witch Wanda", Arc::new(witch), None),
+        Player::new("werewolf", "Vince", Arc::new(werewolf.clone()), None),
+        Player::new("spy", "Violet", Arc::new(spy), None),
+        Player::new("seer", "Seer Sam", Arc::new(seer), None),
+        Player::new("middle1", "middle 1", Arc::new(villager1.clone()), Some(0)),
+        Player::new("middle2", "middle 2", Arc::new(villager1.clone()), Some(1)),
+        Player::new("middle3", "middle 3", Arc::new(villager1.clone()), Some(2)),
     ];
 
-    let middles = vec![
-        Player::new("middle1", "middle 1", Arc::new(villager1.clone())),
-        Player::new("middle2", "middle 2", Arc::new(villager1.clone())),
-        Player::new("middle3", "middle 3", Arc::new(villager1.clone())),
-    ];
-
-    let state = GameState::new(players, middles).await;
+    let state = GameState::new(players).await;
     let (tx, mut rx) = broadcast::channel(16);
     let runner = GameRunner::new(state, tx.clone()).await;
     let runner_inner = runner.clone();
@@ -60,6 +60,12 @@ async fn main() {
                     player_id,
                     workflow,
                 } => {
+                    println!("  {:?}", workflow);
+                    if workflow.completed {
+                        println!("workflow complete");
+                        continue;
+                    }
+                    let mut should_continue = true;
                     if !workflow.waiting {
                         for input in workflow.inputs.iter() {
                             let runner_clone_inner = Arc::clone(&runner_inner);
@@ -67,7 +73,6 @@ async fn main() {
                             let workflow_instance_id = workflow.instance_id.clone();
                             if let InputType::ServerActionLoader { target } = &input.input_type {
                                 let target = target.clone();
-                                println!("Sending back a server loader {target}");
                                 tokio::spawn(async move {
                                     runner_clone_inner
                                         .lock()
@@ -83,23 +88,18 @@ async fn main() {
                                         .await
                                         .expect("workflow action failed");
                                 });
-                                // Now you can use the `target` variable here
-                                // handle the case when found, e.g., println!("Found target: {:?}", target);
+                                should_continue = false;
                             }
                         }
                     }
 
-                    if &player_id == "witch" {
-                        println!(
-                            "🔁 Workflow updated for witch {} : {:?}",
-                            player_id, workflow
-                        );
+                    if !should_continue {
+                        continue;
                     }
 
                     if &player_id == "werewolf" {
                         let args = match workflow.current_node_id.as_str() {
                             "select_card_node" => {
-                                // Simulate selecting a card to view
                                 let mut input = HashMap::new();
                                 input.insert(
                                     "selected_card".to_string(),
@@ -128,13 +128,11 @@ async fn main() {
                     if &workflow.workflow_id == "user-bot-wf-seer_ability_workflow" {
                         let args = match workflow.current_node_id.as_str() {
                             "select_card_node" => {
-                                // Simulate selecting a card to view
                                 let mut input = HashMap::new();
                                 input.insert(
                                     "selected_card".to_string(),
                                     json!({"type": "Player", "Player": {"id": "witch"}}),
                                 );
-                                println!("sending input back");
                                 ProcessWorkflowActionArgs::new(
                                     workflow.instance_id.clone(),
                                     "next".into(),
@@ -142,9 +140,7 @@ async fn main() {
                                 )
                             }
                             "prompt_player_reveal" => {
-                                // Simulate selecting a card to view
                                 let input = HashMap::new();
-                                println!("want to send next again");
                                 ProcessWorkflowActionArgs::new(
                                     workflow.instance_id.clone(),
                                     "next".into(),
@@ -156,13 +152,14 @@ async fn main() {
 
                         let runner_clone = Arc::clone(&runner_inner);
                         tokio::spawn(async move {
-                            println!("processed action {:?}", args);
+                            println!("processing action {:?}...", args);
                             runner_clone
                                 .lock()
                                 .await
-                                .process_workflow_action(&player_id, args)
+                                .process_workflow_action(&player_id, args.clone())
                                 .await
                                 .expect("workflow action failed");
+                            println!("done processed action {:?}", args.action_id);
                         });
                     }
                 }

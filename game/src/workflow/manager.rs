@@ -1,17 +1,14 @@
 use futures::future::BoxFuture;
-use serde_json::json;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::Mutex;
 
-use crate::gamerunner::GameEvent;
-
 use super::server_action::{ServerActionContext, ServerActionHandler, ServerActionResult};
-use super::service::{WorkflowPlugin, WorkflowResource};
+use super::service::WorkflowResource;
 use super::{
-    ActionType, CreateWorkflowDefinition, NodeCondition, ServerActionDefinition,
-    UserWorkflowPreferences, WorkflowAction, WorkflowDefinition, WorkflowNode, WorkflowState,
+    ActionType, CreateWorkflowDefinition, NodeCondition, UserWorkflowPreferences,
+    WorkflowDefinition, WorkflowNode, WorkflowState,
 };
 
 #[derive(Debug, Error)]
@@ -50,11 +47,11 @@ pub enum WorkflowEvent {
 #[derive(Debug)]
 pub enum ActionProcessResult {
     ShowNode {
-        id: String,
-        title: String,
-        description: Option<String>,
-        inputs: Vec<super::WorkflowInput>,
-        actions: Vec<super::WorkflowAction>,
+        node_id: String,
+        // title: String,
+        // description: Option<String>,
+        // inputs: Vec<super::WorkflowInput>,
+        // actions: Vec<super::WorkflowAction>,
     },
     ExternalServerActionStarted {
         id: String,
@@ -166,6 +163,78 @@ impl WorkflowManager {
         }
     }
 
+    pub async fn check_for_waiting(&self, instance_id: &str) {
+        let resource = self
+            .get_workflow_resource(instance_id)
+            .await
+            .expect("Not found??");
+
+        if !resource.completed {
+            return;
+        }
+
+        let response = self.waiting_for_response.lock().await.remove(instance_id);
+        println!("Response: {:?}", response);
+        if let Some((waiting_instance_id, input_key)) = response {
+            {
+                let resource = self
+                    .get_workflow_resource(instance_id)
+                    .await
+                    .expect("Not found??");
+                let state = {
+                    if let Some(state) = self
+                        .active_workflows
+                        .lock()
+                        .await
+                        .get_mut(&waiting_instance_id)
+                    {
+                        state.waiting = false;
+
+                        if let Some(key) = input_key {
+                            let resource_value = serde_json::to_value(&resource.responses)
+                                .expect("Failed to serialize WorkflowResource");
+                            state.responses.insert(key, resource_value);
+                        }
+
+                        let workflow_definition = {
+                            let wf = self.workflows.lock().await;
+                            wf.get(&state.workflow_id)
+                                .expect("Unable to find workflow definition")
+                                .clone()
+                        };
+                        let current_node = workflow_definition
+                            .nodes
+                            .get(&state.current_node_id)
+                            .expect("what");
+                        let valid_child = self
+                            .find_valid_child_node(&workflow_definition, current_node, &state)
+                            .expect("No next child found");
+                        state.node_history.push(state.current_node_id.clone());
+                        state.current_node_id = valid_child.id.clone();
+                        state.updated_at = chrono::Utc::now();
+
+                        Some(state.clone())
+                    } else {
+                        None
+                    }
+                };
+
+                if let Some(state) = state {
+                    self.update_state(&waiting_instance_id, state)
+                        .await
+                        .expect("unable to update state");
+                }
+            }
+
+            let resource = self
+                .get_workflow_resource(&waiting_instance_id)
+                .await
+                .expect("Not found??");
+            self.event_manager.lock().await.workflow_updated(resource);
+            println!("Refreshed {waiting_instance_id}");
+        }
+    }
+
     pub async fn process_external_server_action(
         &self,
         instance_id: String,
@@ -257,6 +326,60 @@ impl WorkflowManager {
         Ok(())
     }
 
+    async fn update_state(
+        &self,
+        instance_id: &str,
+        state: WorkflowState,
+    ) -> Result<(), WorkflowError> {
+        let mut workflows = self.active_workflows.lock().await;
+        if let Some(old_state) = workflows.get_mut(instance_id) {
+            *old_state = state.clone();
+            Ok(())
+        } else {
+            Err(WorkflowError::WorkflowNotFound)
+        }
+    }
+
+    pub async fn show_node(
+        &self,
+        instance_id: &str,
+        target_node_id: &str,
+    ) -> Result<(), WorkflowError> {
+        let state = &mut {
+            let mut active_workflows = self.active_workflows.lock().await;
+            active_workflows
+                .get_mut(instance_id)
+                .ok_or(WorkflowError::WorkflowInstanceNotFound)?
+                .clone()
+        };
+
+        let definition = self
+            .workflows
+            .lock()
+            .await
+            .get(&state.workflow_id)
+            .ok_or(WorkflowError::NodeNotFound)?
+            .clone();
+
+        if definition.nodes.get(target_node_id).is_some() {
+            state.current_node_id = target_node_id.to_string();
+        } else {
+            return Err(WorkflowError::ServerActionFailed(format!(
+                "no node found: {target_node_id}"
+            )));
+        }
+
+        self.update_state(instance_id, state.clone()).await?;
+
+        self.event_manager.lock().await.workflow_updated(
+            self.get_workflow_resource(instance_id)
+                .await
+                .ok_or(WorkflowError::WorkflowNotFound)?,
+        );
+
+        Ok(())
+    }
+
     pub async fn start_workflow(
         &self,
         workflow_id: &str,
@@ -297,6 +420,7 @@ impl WorkflowManager {
             active_workflows.insert(instance_id.clone(), state);
         }
 
+        println!("workflow started");
         self.event_manager.lock().await.workflow_started(
             self.get_workflow_resource(&instance_id)
                 .await
@@ -357,11 +481,7 @@ impl WorkflowManager {
                         state.updated_at = chrono::Utc::now();
 
                         Ok(ActionProcessResult::ShowNode {
-                            id: target_node.id.clone(),
-                            title: target_node.title.clone(),
-                            description: target_node.description.clone(),
-                            inputs: target_node.inputs.clone(),
-                            actions: target_node.actions.clone(),
+                            node_id: target_node.id.clone(),
                         })
                     } else {
                         println!("lookn hre");
@@ -376,11 +496,7 @@ impl WorkflowManager {
                     state.updated_at = chrono::Utc::now();
 
                     Ok(ActionProcessResult::ShowNode {
-                        id: valid_child.id.clone(),
-                        title: valid_child.title.clone(),
-                        description: valid_child.description.clone(),
-                        inputs: valid_child.inputs.clone(),
-                        actions: valid_child.actions.clone(),
+                        node_id: valid_child.id.clone(),
                     })
                 }
             }
@@ -395,11 +511,7 @@ impl WorkflowManager {
                     state.updated_at = chrono::Utc::now();
 
                     Ok(ActionProcessResult::ShowNode {
-                        id: previous_node.id.clone(),
-                        title: previous_node.title.clone(),
-                        description: previous_node.description.clone(),
-                        inputs: previous_node.inputs.clone(),
-                        actions: previous_node.actions.clone(),
+                        node_id: previous_node.id.clone(),
                     })
                 } else {
                     // No previous node, this is an error
@@ -480,14 +592,8 @@ impl WorkflowManager {
                 }
             }
         }?;
-        let resource = self
-            .get_workflow_resource(&instance_id)
-            .await
-            .ok_or(WorkflowError::NodeNotFound)?;
-        self.event_manager
-            .lock()
-            .await
-            .workflow_updated(resource.clone());
+
+        self.update_state(&instance_id, state.clone()).await?;
 
         Ok(response)
     }
@@ -580,7 +686,8 @@ impl WorkflowManager {
         workflow_definition: &WorkflowDefinition,
         workflow_id: &str,
         state: &mut WorkflowState,
-    ) -> Result<(), WorkflowError> {
+    ) -> Result<bool, WorkflowError> {
+        let mut send_refresh = false;
         match result {
             ServerActionResult::WaitForWorkflow {
                 inject_response_as,
@@ -597,9 +704,10 @@ impl WorkflowManager {
                         );
                         state.waiting = true;
                         self.waiting_for_response.lock().await.insert(
-                            workflow_id.to_string(),
-                            (started_workflow_id.to_string(), inject_response_as.clone()),
+                            started_workflow_id.to_string(),
+                            (workflow_id.to_string(), inject_response_as.clone()),
                         );
+                        send_refresh = true;
                     }
                     Err(e) => {
                         eprintln!("Unable to start workflow {:?}", e);
@@ -611,6 +719,7 @@ impl WorkflowManager {
                 if let Some(node) = workflow_definition.nodes.get(page_id) {
                     state.node_history.push(state.current_node_id.clone());
                     state.current_node_id = page_id.clone();
+                    send_refresh = true;
                 } else {
                     println!("ooo");
                     return Err(WorkflowError::NodeNotFound);
@@ -621,7 +730,6 @@ impl WorkflowManager {
                     state.responses.insert(key.clone(), value.clone());
                 }
 
-                println!("prob herezc$");
                 let current_node = workflow_definition
                     .nodes
                     .get(&state.current_node_id)
@@ -631,7 +739,7 @@ impl WorkflowManager {
                     self.find_valid_child_node(&workflow_definition, current_node, state)?;
                 state.node_history.push(state.current_node_id.clone());
                 state.current_node_id = valid_child.id.clone();
-                println!("updated valid child {:?}", valid_child);
+                send_refresh = true;
             }
             ServerActionResult::CompleteWorkflow { message, responses } => {
                 for (key, value) in responses {
@@ -639,10 +747,12 @@ impl WorkflowManager {
                 }
                 state.complete_message = Some(message.clone());
                 state.completed = true;
+                send_refresh = true;
             }
             _ => {}
         }
-        Ok(())
+
+        Ok(send_refresh)
     }
 
     pub async fn execute_server_action(
@@ -671,6 +781,7 @@ impl WorkflowManager {
                 .ok_or(WorkflowError::WorkflowNotFound)?
                 .clone()
         };
+        println!("state {:?}", state);
 
         let context = ServerActionContext {
             action_id: action_id.to_string(),
@@ -685,10 +796,11 @@ impl WorkflowManager {
             .map_err(|e| WorkflowError::ServerActionFailed(e.to_string()))?;
 
         // Process server action result
-        self.process_server_action_results(&result, &workflow_definition, workflow_id, state)
-            .await?;
 
         state.updated_at = chrono::Utc::now();
+        let send_refresh = self
+            .process_server_action_results(&result, &workflow_definition, &instance_id, state)
+            .await?;
 
         {
             let mut workflows = self.active_workflows.lock().await;
@@ -697,6 +809,14 @@ impl WorkflowManager {
             } else {
                 return Err(WorkflowError::WorkflowNotFound);
             }
+        }
+
+        if send_refresh {
+            let resource = self
+                .get_workflow_resource(&instance_id)
+                .await
+                .ok_or(WorkflowError::WorkflowNotFound)?;
+            self.event_manager.lock().await.workflow_updated(resource);
         }
 
         Ok(result)
