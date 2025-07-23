@@ -196,7 +196,7 @@ impl WorkflowManager {
                         state.waiting = false;
 
                         if let Some(key) = input_key {
-                            let resource_value = serde_json::to_value(&resource.responses)
+                            let resource_value = serde_json::to_value(&resource)
                                 .expect("Failed to serialize WorkflowResource");
                             state.responses.insert(key, resource_value);
                         }
@@ -262,7 +262,7 @@ impl WorkflowManager {
                     state.waiting = false;
 
                     if let Some(key) = input_key {
-                        let resource_value = serde_json::to_value(&resource.responses)
+                        let resource_value = serde_json::to_value(&resource)
                             .expect("Failed to serialize WorkflowResource");
                         state.responses.insert(key, resource_value);
                     }
@@ -758,7 +758,7 @@ impl WorkflowManager {
         let mut send_refresh = false;
         match result {
             ServerActionResult::WaitForPredicate {
-                inject_response_as,
+                inject_workflow_as,
                 predicate,
                 on_complete,
             } => {
@@ -769,12 +769,12 @@ impl WorkflowManager {
                 state.waiting = true;
                 self.waiting_for_predicate.lock().await.insert(
                     workflow_id.to_string(),
-                    (predicate.clone(), inject_response_as.clone()),
+                    (predicate.clone(), inject_workflow_as.clone()),
                 );
                 send_refresh = true;
             }
             ServerActionResult::StartAndWaitWorkflow {
-                inject_response_as,
+                inject_workflow_as,
                 inputs,
                 definition_id: workflow_definition_id,
                 on_complete,
@@ -790,7 +790,7 @@ impl WorkflowManager {
                         state.waiting = true;
                         self.waiting_for_response.lock().await.insert(
                             started_workflow_id.to_string(),
-                            (workflow_id.to_string(), inject_response_as.clone()),
+                            (workflow_id.to_string(), inject_workflow_as.clone()),
                         );
                         send_refresh = true;
                     }

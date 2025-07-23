@@ -80,12 +80,12 @@ pub enum ServerActionResult {
     StartAndWaitWorkflow {
         inputs: HashMap<String, Value>,
         definition_id: String,
-        inject_response_as: Option<String>,
+        inject_workflow_as: Option<String>,
         on_complete: Option<ActionType>,
     },
     WaitForPredicate {
         predicate: WorkflowPredicate,
-        inject_response_as: Option<String>,
+        inject_workflow_as: Option<String>,
         on_complete: Option<ActionType>,
     },
 }

@@ -76,7 +76,7 @@ async fn register_start_sabotaged_role_workflow(game: Arc<Mutex<GameState>>) {
                     Ok(ServerActionResult::StartAndWaitWorkflow {
                         definition_id: workflow.definition,
                         inputs: workflow.input,
-                        inject_response_as: None,
+                        inject_workflow_as: None,
                         on_complete: None,
                     })
                 })

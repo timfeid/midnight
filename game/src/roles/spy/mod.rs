@@ -65,7 +65,7 @@ async fn register_start_role_workflow(game: Arc<Mutex<GameState>>) {
                         if player.middle_position.is_none() {
                             return Ok(ServerActionResult::WaitForPredicate {
                                 predicate: WorkflowPredicate::ByUserId(player.id),
-                                inject_response_as: Some("observed_results".to_string()),
+                                inject_workflow_as: Some("observed_results".to_string()),
                                 on_complete: Some(ActionType::NextNode),
                             });
                         }
